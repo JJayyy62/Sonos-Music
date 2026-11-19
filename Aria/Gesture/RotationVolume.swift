@@ -160,7 +160,7 @@ private struct VolumeKnob: View {
                     .rotationEffect(.degrees(-135 + 270 * fraction))
                 VStack(spacing: 2) {
                     Text("\(volume)")
-                        .font(.system(size: 44, weight: .bold, design: .rounded))
+                        .font(.system(size: 44, weight: .bold))
                         .monospacedDigit()
                         .contentTransition(.numericText(value: Double(volume)))
                     Image(systemName: volume == 0 ? "speaker.slash.fill" : "speaker.wave.\(min(3, volume / 34 + 1)).fill")

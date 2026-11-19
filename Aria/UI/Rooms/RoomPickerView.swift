@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// AirPlayピッカー風のスピーカー選択・グループ編集
+/// スピーカー選択・グループ編集
 struct RoomPickerView: View {
     @Environment(SonosStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -30,6 +30,11 @@ struct RoomPickerView: View {
                             .tint(Color.appAccent)
                         }
                         .padding(.vertical, 4)
+                        NavigationLink {
+                            SoundRoomsView(speakers: group.members)
+                        } label: {
+                            Label("サウンド設定", systemImage: "slider.vertical.3")
+                        }
                     } header: {
                         Text("再生中のグループ")
                     }
@@ -58,6 +63,7 @@ struct RoomPickerView: View {
                     }
                 }
             }
+            .inkBackground()
             .navigationTitle("スピーカー")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

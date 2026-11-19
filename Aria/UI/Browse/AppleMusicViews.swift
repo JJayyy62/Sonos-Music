@@ -47,6 +47,7 @@ struct AppleMusicAlbumView: View {
             }
         }
         .listStyle(.plain)
+        .inkBackground()
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -130,6 +131,7 @@ struct AppleMusicPlaylistView: View {
             }
         }
         .listStyle(.plain)
+        .inkBackground()
         .navigationBarTitleDisplayMode(.inline)
         .task {
             if let detailed = try? await playlist.with([.tracks]), let loaded = detailed.tracks {
@@ -150,7 +152,7 @@ struct AppleMusicArtistView: View {
         List {
             Section {
                 VStack(spacing: 12) {
-                    ArtworkView(url: artist.artwork?.url(width: 500, height: 500), cornerRadius: 110, placeholderSymbol: "music.mic")
+                    ArtworkView(url: artist.artwork?.url(width: 500, height: 500), cornerRadius: 110, placeholderSymbol: "music.mic", seed: artist.name)
                         .frame(width: 220, height: 220)
                     Text(artist.name).font(.largeTitle.bold()).multilineTextAlignment(.center)
                 }
@@ -181,6 +183,7 @@ struct AppleMusicArtistView: View {
             }
         }
         .listStyle(.plain)
+        .inkBackground()
         .navigationBarTitleDisplayMode(.inline)
         .task {
             if let detailed = try? await artist.with([.topSongs, .albums]) {

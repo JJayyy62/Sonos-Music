@@ -9,6 +9,7 @@ struct NowPlayingView: View {
     @State private var palette = ArtworkPalette.fallback
     @State private var showRooms = false
     @State private var showQuality = false
+    @State private var showSound = false
     @Namespace private var artworkSpace
 
     var body: some View {
@@ -37,7 +38,7 @@ struct NowPlayingView: View {
                 }
                 .frame(maxHeight: .infinity)
 
-                PlayerControls(panel: $panel, showRooms: $showRooms, showQuality: $showQuality)
+                PlayerControls(panel: $panel, showRooms: $showRooms, showQuality: $showQuality, showSound: $showSound)
             }
             .padding(.horizontal, 26)
             .padding(.bottom, 6)
@@ -52,6 +53,15 @@ struct NowPlayingView: View {
         .sheet(isPresented: $showRooms) {
             RoomPickerView()
                 .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showSound) {
+            NavigationStack {
+                SoundRoomsView(speakers: store.selectedGroup?.members ?? [])
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) { Button("完了") { showSound = false } }
+                    }
+            }
+            .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showQuality) {
             QualityInfoSheet(quality: store.quality, deviceName: store.selectedGroup?.name ?? "")
@@ -71,14 +81,17 @@ struct NowPlayingView: View {
         .accessibilityLabel("閉じる")
     }
 
+    /// 大きなアートワーク。一時停止すると少し縮む
     private var largeArtwork: some View {
         GeometryReader { geometry in
             let side = min(geometry.size.width, geometry.size.height)
-            ArtworkView(url: store.track?.artworkURL, cornerRadius: 12, placeholderSymbol: placeholderSymbol)
+            ArtworkView(url: store.track?.artworkURL, cornerRadius: 12, placeholderSymbol: placeholderSymbol,
+                        seed: store.track?.title)
                 .matchedGeometryEffect(id: "artwork", in: artworkSpace)
                 .frame(width: side, height: side)
                 .scaleEffect(store.isPlaying ? 1 : 0.8)
-                .shadow(color: .black.opacity(store.isPlaying ? 0.45 : 0.25), radius: store.isPlaying ? 28 : 12, y: store.isPlaying ? 16 : 6)
+                .shadow(color: .black.opacity(store.isPlaying ? 0.45 : 0.25), radius: store.isPlaying ? 28 : 12,
+                        y: store.isPlaying ? 16 : 6)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .animation(.spring(response: 0.5, dampingFraction: 0.68), value: store.isPlaying)
                 .onTapGesture { if store.lyrics.hasSyncedLyrics { setPanel(.lyrics) } }
@@ -88,7 +101,8 @@ struct NowPlayingView: View {
 
     private var compactHeader: some View {
         HStack(spacing: 12) {
-            ArtworkView(url: store.track?.artworkURL, cornerRadius: 6, placeholderSymbol: placeholderSymbol)
+            ArtworkView(url: store.track?.artworkURL, cornerRadius: 6, placeholderSymbol: placeholderSymbol,
+                        seed: store.track?.title)
                 .matchedGeometryEffect(id: "artwork", in: artworkSpace)
                 .frame(width: 60, height: 60)
                 .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
@@ -103,7 +117,7 @@ struct NowPlayingView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            PlayerMoreMenu(panel: $panel)
+            PlayerMoreMenu(panel: $panel) { showSound = true }
         }
         .padding(.vertical, 14)
     }
@@ -129,6 +143,7 @@ struct PlayerControls: View {
     @Binding var panel: NowPlayingView.Panel
     @Binding var showRooms: Bool
     @Binding var showQuality: Bool
+    @Binding var showSound: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -152,13 +167,19 @@ struct PlayerControls: View {
                 Text(store.track?.title ?? "再生停止中")
                     .font(.title3.weight(.bold))
                     .lineLimit(1)
-                Text(subtitle)
-                    .font(.title3)
-                    .foregroundStyle(.white.opacity(0.6))
-                    .lineLimit(1)
+                HStack(spacing: 8) {
+                    Text(subtitle)
+                        .font(.title3)
+                        .foregroundStyle(.white.opacity(0.6))
+                        .lineLimit(1)
+                    if let service = store.currentService {
+                        ServiceTag(service: service, size: 9)
+                            .layoutPriority(1)
+                    }
+                }
             }
             Spacer(minLength: 8)
-            PlayerMoreMenu(panel: $panel)
+            PlayerMoreMenu(panel: $panel) { showSound = true }
         }
     }
 
@@ -174,6 +195,7 @@ struct PlayerControls: View {
             Button { store.previous() } label: {
                 Image(systemName: "backward.fill").font(.system(size: 32))
             }
+            .accessibilityLabel("前の曲")
             Spacer()
             Button { store.togglePlayPause() } label: {
                 Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
@@ -181,10 +203,12 @@ struct PlayerControls: View {
                     .contentTransition(.symbolEffect(.replace))
             }
             .buttonStyle(TransportButtonStyle(size: 88))
+            .accessibilityLabel(store.isPlaying ? "一時停止" : "再生")
             Spacer()
             Button { store.next() } label: {
                 Image(systemName: "forward.fill").font(.system(size: 32))
             }
+            .accessibilityLabel("次の曲")
             Spacer()
         }
         .buttonStyle(TransportButtonStyle())
@@ -228,9 +252,11 @@ struct PlayerControls: View {
 struct PlayerMoreMenu: View {
     @Environment(SonosStore.self) private var store
     @Binding var panel: NowPlayingView.Panel
+    var openSound: () -> Void = {}
 
     var body: some View {
         Menu {
+            Button("サウンド設定（EQ・バランスなど）", systemImage: "slider.vertical.3", action: openSound)
             Section("スリープタイマー") {
                 ForEach([15, 30, 45, 60, 90], id: \.self) { minutes in
                     Button("\(minutes)分") { store.setSleepTimer(minutes: minutes) }

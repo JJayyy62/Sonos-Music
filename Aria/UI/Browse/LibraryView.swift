@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct LibraryView: View {
+    @Environment(AppleMusicService.self) private var music
+
     private struct Entry: Identifiable {
         let id: String
         let title: String
@@ -25,27 +27,68 @@ struct LibraryView: View {
             Section {
                 ForEach(sonosEntries) { entry in row(entry) }
             }
+            // Apple Music API が使えないときは、開いても空になる行は出さない
+            if music.apiAvailable != false {
+                Section {
+                    appleRow("プレイリスト", symbol: "music.note.list") {
+                        CatalogListView(title: "プレイリスト", load: { await music.libraryPlaylists() },
+                                        problem: { music.apiProblem ?? music.libraryProblem })
+                    }
+                    appleRow("アルバム", symbol: "square.stack") {
+                        CatalogListView(title: "アルバム", load: { await music.libraryAlbums() },
+                                        problem: { music.apiProblem ?? music.libraryProblem })
+                    }
+                } header: {
+                    ServiceTag(service: .appleMusic, size: 11)
+                } footer: {
+                    if !music.isAuthorized {
+                        Text("Apple Musicと連携すると、自分のライブラリのプレイリストとアルバムが表示されます。")
+                    } else if let problem = music.libraryProblem {
+                        Text(problem)
+                    }
+                }
+            }
             Section {
                 ForEach(libraryEntries) { entry in row(entry) }
             } header: {
                 Text("ミュージックライブラリ（NAS・共有フォルダ）")
             } footer: {
-                Text("Sonosに登録したローカルの音楽ライブラリです。Apple Musicなどのストリーミングは「検索」から探せます。")
+                Text("Sonosに登録したローカルの音楽ライブラリです。Apple Musicなどのストリーミングは「検索」から探せます。自分のプレイリストは、純正のSonosアプリで「お気に入り」に追加すると「Sonosお気に入り」から再生できます。")
             }
         }
+        .inkBackground()
         .navigationTitle("ライブラリ")
+    }
+
+    private func appleRow<Destination: View>(_ title: String, symbol: String,
+                                             @ViewBuilder destination: @escaping () -> Destination) -> some View {
+        NavigationLink(destination: destination) {
+            HStack(spacing: 14) {
+                Image(systemName: symbol)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(StreamingService.appleMusic.tint)
+                    .frame(width: 38, height: 38)
+                    .background(StreamingService.appleMusic.tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                Text(title).font(.body.weight(.semibold))
+            }
+            .padding(.vertical, 2)
+        }
+        .disabled(!music.isAuthorized)
     }
 
     private func row(_ entry: Entry) -> some View {
         NavigationLink {
             BrowseView(title: entry.title, objectID: entry.id)
         } label: {
-            Label {
-                Text(entry.title).font(.title3)
-            } icon: {
-                Image(systemName: entry.symbol).foregroundStyle(Color.appAccent)
+            HStack(spacing: 14) {
+                Image(systemName: entry.symbol)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 38, height: 38)
+                    .background(Theme.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                Text(entry.title).font(.body.weight(.semibold))
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
         }
     }
 }
@@ -121,6 +164,7 @@ struct BrowseView: View {
             }
         }
         .listStyle(.plain)
+        .inkBackground()
         .navigationTitle(showsAlbumHeader ? "" : title)
         .navigationBarTitleDisplayMode(showsAlbumHeader ? .inline : .large)
         .overlay {
@@ -165,7 +209,7 @@ struct BrowseView: View {
     }
 }
 
-/// Apple Music風のアルバム／プレイリストのヘッダー
+/// アルバム／プレイリストのヘッダー
 struct AlbumHeader: View {
     let artworkURL: URL?
     let title: String
@@ -177,12 +221,12 @@ struct AlbumHeader: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            ArtworkView(url: artworkURL, cornerRadius: 10)
+            ArtworkView(url: artworkURL, cornerRadius: 24, seed: title)
                 .frame(width: 250, height: 250)
-                .shadow(color: .black.opacity(0.2), radius: 16, y: 8)
+                .shadow(color: .black.opacity(0.5), radius: 22, y: 12)
                 .padding(.top, 8)
             Text(title)
-                .font(.title2.bold())
+                .font(.system(.title2, weight: .heavy))
                 .multilineTextAlignment(.center)
             if let subtitle {
                 Text(subtitle)
@@ -191,7 +235,7 @@ struct AlbumHeader: View {
                     .multilineTextAlignment(.center)
             }
             if let detail {
-                Text(detail).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text(detail.uppercased()).font(Theme.label(11)).tracking(1).foregroundStyle(Theme.textTertiary)
             }
             if !badges.isEmpty {
                 HStack(spacing: 8) {
@@ -203,7 +247,7 @@ struct AlbumHeader: View {
                 }
             }
             HStack(spacing: 14) {
-                PillButton(title: "再生", symbol: "play.fill", action: play)
+                PillButton(title: "再生", symbol: "play.fill", primary: true, action: play)
                 PillButton(title: "シャッフル", symbol: "shuffle", action: shuffle)
             }
             .padding(.top, 6)

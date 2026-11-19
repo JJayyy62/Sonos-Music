@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Apple Music風の、触ると太くなるカプセル型スライダー（相対ドラッグ）
+/// 触ると太くなるカプセル型スライダー（相対ドラッグ）
 struct CapsuleSlider: View {
     /// 0...1
     var value: Double
@@ -48,6 +48,16 @@ struct CapsuleSlider: View {
     }
 }
 
+/// 押すと少し沈むボタン
+struct PressableStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
 /// 押すと円形のハイライトが出る再生ボタン
 struct TransportButtonStyle: ButtonStyle {
     var size: CGFloat = 76
@@ -72,9 +82,9 @@ struct PanelToggleButton: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(isOn ? Color.black.opacity(0.75) : Color.white.opacity(0.75))
+                .foregroundStyle(isOn ? Theme.onAccent : Color.white.opacity(0.75))
                 .frame(width: 40, height: 34)
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white.opacity(isOn ? 0.85 : 0)))
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(isOn ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.clear)))
         }
         .buttonStyle(.plain)
         .animation(.easeOut(duration: 0.2), value: isOn)
@@ -91,32 +101,34 @@ struct ModeChip: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(isOn ? Color.black.opacity(0.8) : Color.white.opacity(0.8))
+                .foregroundStyle(isOn ? Theme.onAccent : Color.white.opacity(0.8))
                 .frame(maxWidth: .infinity)
                 .frame(height: 36)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.white.opacity(isOn ? 0.85 : 0.14)))
+                .background(Capsule().fill(isOn ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.white.opacity(0.1))))
         }
         .buttonStyle(.plain)
         .animation(.easeOut(duration: 0.2), value: isOn)
     }
 }
 
-/// アルバム画面の「再生」「シャッフル」ボタン
+/// アルバム画面の「再生」「シャッフル」ボタン。primary はアンバーで塗りつぶす
 struct PillButton: View {
     let title: String
     let symbol: String
+    var primary = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Label(title, systemImage: symbol)
                 .font(.headline)
-                .foregroundStyle(Color.appAccent)
+                .foregroundStyle(primary ? Theme.onAccent : .white)
                 .frame(maxWidth: .infinity)
-                .frame(height: 48)
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(.secondarySystemFill)))
+                .frame(height: 50)
+                .background(Capsule().fill(primary ? Theme.accent : Theme.surfaceRaised))
+                .overlay(Capsule().strokeBorder(primary ? .clear : Theme.hairline))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle())
     }
 }
 
@@ -129,7 +141,8 @@ struct ToastView: View {
             .multilineTextAlignment(.center)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-            .background(.regularMaterial, in: Capsule())
+            .background(Theme.surfaceRaised, in: Capsule())
+            .overlay(Capsule().strokeBorder(Theme.accent.opacity(0.35)))
             .shadow(color: .black.opacity(0.15), radius: 12, y: 4)
             .padding(.horizontal, 24)
             .padding(.top, 8)
@@ -166,12 +179,12 @@ struct TrackRow: View {
     var body: some View {
         HStack(spacing: 12) {
             if let leadingNumber {
-                Text("\(leadingNumber)")
-                    .font(.body.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                Text(String(format: "%02d", leadingNumber))
+                    .font(Theme.label(13))
+                    .foregroundStyle(Theme.textTertiary)
                     .frame(minWidth: 24, alignment: .center)
             } else {
-                ArtworkView(url: artworkURL, cornerRadius: 5)
+                ArtworkView(url: artworkURL, cornerRadius: 10, seed: title)
                     .frame(width: 48, height: 48)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -182,7 +195,7 @@ struct TrackRow: View {
             }
             Spacer(minLength: 8)
             if let trailing {
-                Text(trailing).font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                Text(trailing).font(Theme.label(12)).foregroundStyle(Theme.textTertiary)
             }
         }
         .contentShape(Rectangle())

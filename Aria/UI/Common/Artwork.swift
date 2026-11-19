@@ -1,11 +1,6 @@
 import SwiftUI
 import UIKit
 
-extension Color {
-    /// Apple Music風のアクセントカラー
-    static let appAccent = Color(red: 0.98, green: 0.17, blue: 0.29)
-}
-
 // MARK: - Image loading
 
 actor ImageLoader {
@@ -40,6 +35,10 @@ struct ArtworkView: View {
     let url: URL?
     var cornerRadius: CGFloat = 8
     var placeholderSymbol = "music.note"
+    /// アートワークがないときの生成カバーの元になる文字列（曲名・お気に入り名など）
+    var seed: String?
+    /// 丸く切り抜くとき（レコードのレーベルなど）は頭文字を中央に置く
+    var circular = false
 
     @State private var image: UIImage?
 
@@ -53,22 +52,13 @@ struct ArtworkView: View {
                         .scaledToFill()
                         .transition(.opacity)
                 } else {
-                    GeometryReader { geometry in
-                        ZStack {
-                            LinearGradient(colors: [Color(white: 0.36), Color(white: 0.24)], startPoint: .top, endPoint: .bottom)
-                            Image(systemName: placeholderSymbol)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: geometry.size.width * 0.34)
-                                .foregroundStyle(.white.opacity(0.55))
-                        }
-                    }
+                    GeneratedCover(seed: seed, symbol: placeholderSymbol, centered: circular)
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+                    .strokeBorder(Theme.hairline, lineWidth: 0.5)
             }
             .task(id: url) {
                 guard let url else {
@@ -78,6 +68,71 @@ struct ArtworkView: View {
                 let loaded = await ImageLoader.shared.image(for: url)
                 withAnimation(.easeOut(duration: 0.25)) { image = loaded }
             }
+    }
+}
+
+/// アートワークがない項目用のカバー。名前から色と模様を決めるので、同じ項目はいつも同じ見た目になる
+struct GeneratedCover: View {
+    let seed: String?
+    let symbol: String
+    var centered = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            let side = min(geometry.size.width, geometry.size.height)
+            let hash = Self.stableHash(seed ?? "")
+            let hue = Double(hash % 360) / 360
+            let hue2 = (hue + 0.08 + Double((hash >> 9) % 18) / 100).truncatingRemainder(dividingBy: 1)
+            ZStack {
+                LinearGradient(
+                    colors: [Color(hue: hue, saturation: 0.55, brightness: 0.42),
+                             Color(hue: hue2, saturation: 0.65, brightness: 0.16)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .overlay {
+                        // 同心円の模様。枠からはみ出す分は切り取り、レイアウトの大きさに影響させない
+                        ZStack {
+                            ForEach(0..<5, id: \.self) { ring in
+                                Circle()
+                                    .stroke(.white.opacity(0.07), lineWidth: max(0.5, side * 0.006))
+                                    .frame(width: side * (0.5 + CGFloat(ring) * 0.28), height: side * (0.5 + CGFloat(ring) * 0.28))
+                                    .offset(x: side * 0.32, y: side * 0.32)
+                            }
+                        }
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
+                    }
+                if let initial = Self.initial(of: seed) {
+                    Text(initial)
+                        .font(.system(size: side * 0.42, weight: .heavy))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(centered ? 0 : side * 0.1)
+                        .frame(width: geometry.size.width, height: geometry.size.height,
+                               alignment: centered ? .center : .topLeading)
+                } else {
+                    Image(systemName: symbol)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: side * 0.32)
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+    }
+
+    private static func initial(of seed: String?) -> String? {
+        guard let first = seed?.trimmingCharacters(in: .whitespaces).first else { return nil }
+        return String(first).uppercased()
+    }
+
+    /// 起動ごとに変わらないハッシュ（FNV-1a）
+    private static func stableHash(_ text: String) -> UInt64 {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x100000001b3
+        }
+        return hash
     }
 }
 
@@ -97,7 +152,7 @@ struct ArtworkPalette: Equatable {
         return extract(from: image) ?? .fallback
     }
 
-    /// 画像を3×3ブロックの平均色に縮約して、メッシュグラデーションの9色にする
+    /// 画像を3×3ブロックの平均色に縮約して、背景の灯りに使う9色にする
     static func extract(from image: UIImage) -> ArtworkPalette? {
         guard let cgImage = image.cgImage else { return nil }
         let size = 24
@@ -141,6 +196,7 @@ struct ArtworkPalette: Equatable {
     }
 }
 
+/// 再生画面の背景。アートワークの色でゆっくり動くメッシュグラデーション
 struct AnimatedMeshBackground: View {
     let palette: ArtworkPalette
     var animate: Bool

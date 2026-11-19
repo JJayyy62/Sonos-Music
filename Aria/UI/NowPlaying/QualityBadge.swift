@@ -14,12 +14,13 @@ struct QualityBadge: View {
             }
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
-            .foregroundStyle(.white.opacity(0.8))
-            .background(.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .foregroundStyle(Theme.accent)
+            .background(Theme.accent.opacity(0.12), in: Capsule())
+            .overlay(Capsule().strokeBorder(Theme.accent.opacity(0.35), lineWidth: 0.5))
             .overlay(alignment: .topTrailing) {
                 if quality.source == .appleMusicCatalog {
                     // カタログ由来の推定であることを小さく示す
-                    Circle().fill(.white.opacity(0.5)).frame(width: 4, height: 4).offset(x: 1.5, y: -1.5)
+                    Circle().fill(Theme.accent.opacity(0.7)).frame(width: 4, height: 4).offset(x: 1.5, y: -1.5)
                 }
             }
         }
@@ -65,6 +66,7 @@ struct QualityInfoSheet: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .inkBackground()
             .navigationTitle("オーディオ品質")
             .navigationBarTitleDisplayMode(.inline)
         }

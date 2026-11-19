@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Apple Music風のリアルタイム歌詞
+/// リアルタイム歌詞
 struct LyricsPanel: View {
     @Environment(SonosStore.self) private var store
 
@@ -47,9 +47,9 @@ struct SyncedLyricsView: View {
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 0.1, paused: !store.isPlaying)) { context in
-            let time = store.position(at: context.date) + store.lyrics.offset
+            let time = store.position(at: context.date) + store.lyrics.timingOffset
             LyricsScroller(lines: lines, activeIndex: LyricLine.activeIndex(in: lines, at: time)) { line in
-                store.seek(to: max(0, line.time - store.lyrics.offset))
+                store.seek(to: max(0, line.time - store.lyrics.timingOffset))
             }
         }
     }
@@ -147,7 +147,7 @@ struct LyricLineView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .foregroundStyle(.white.opacity(isActive ? 1 : (unblurred ? 0.55 : 0.32)))
+        .foregroundStyle(isActive ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.white.opacity(unblurred ? 0.55 : 0.32)))
         .blur(radius: isActive || unblurred ? 0 : min(Double(distance) * 0.6, 2.4))
         .scaleEffect(isActive ? 1 : 0.96, anchor: .leading)
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -2,7 +2,6 @@ import SwiftUI
 
 struct QueuePanel: View {
     @Environment(SonosStore.self) private var store
-    @State private var editing = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -19,16 +18,13 @@ struct QueuePanel: View {
                         Text("現在はキュー以外のソースを再生中です")
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.5))
+                    } else if !store.queue.isEmpty {
+                        Text("長押しして並べ替え・左にスワイプして削除")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.5))
                     }
                 }
                 Spacer()
-                if !store.queue.isEmpty {
-                    Button(editing ? "完了" : "編集") {
-                        withAnimation { editing.toggle() }
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.8))
-                }
             }
 
             if store.queue.isEmpty {
@@ -44,17 +40,31 @@ struct QueuePanel: View {
                                      isCurrent: store.isPlayingQueue && index + 1 == store.currentTrackNumber,
                                      isPlaying: store.isPlaying,
                                      isPast: store.isPlayingQueue && index + 1 < store.currentTrackNumber)
-                            .onTapGesture { if !editing { store.playQueueItem(at: index) } }
+                            .onTapGesture { store.playQueueItem(at: index) }
                             .listRowBackground(Color.clear)
-                            .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 0))
+                            .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: Self.trailingBleed))
                             .listRowSeparatorTint(.white.opacity(0.12))
+                            // List を右へ広げた分、区切り線も行の中身の右端で止める
+                            .alignmentGuide(.listRowSeparatorTrailing) { dimensions in dimensions.width }
+                            // 削除は左スワイプだけ（編集モードの赤い削除ボタンは出さない）
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    store.removeQueueItems(at: IndexSet(integer: index))
+                                } label: {
+                                    Label("削除", systemImage: "trash")
+                                        .labelStyle(.iconOnly)
+                                }
+                                .tint(.red)
+                            }
                         }
-                        .onDelete { store.removeQueueItems(at: $0) }
+                        // 編集モードにしなくても、長押ししてドラッグすれば並べ替えられる
                         .onMove { store.moveQueueItem(from: $0, to: $1) }
                     }
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
-                    .environment(\.editMode, .constant(editing ? .active : .inactive))
+                    // 削除ボタンは List の右端を基準に置かれるので、List だけを右へ広げて行の中身は同じだけ内側に戻す。
+                    // これで行の見た目は変わらず、削除ボタンの中心が上下の行の並べ替えつまみ（≡）の中心にそろう
+                    .padding(.trailing, -Self.trailingBleed)
                     .onAppear { scrollToCurrent(proxy) }
                     .onChange(of: store.currentTrackNumber) { _, _ in
                         withAnimation { scrollToCurrent(proxy) }
@@ -65,6 +75,11 @@ struct QueuePanel: View {
         .padding(.bottom, 8)
         .task { await store.refreshQueue() }
     }
+
+    /// List を右へ広げる幅。
+    /// 削除ボタン（直径約 49pt の丸）は List の右端から約 10pt 内側に出る。この幅にすると、ボタンの中心が
+    /// 上下の行の並べ替えつまみ（≡）の中心と 1pt 以内でそろう（iPhone 12 Pro のシミュレータで実測）
+    private static let trailingBleed: CGFloat = 25.5
 
     private func scrollToCurrent(_ proxy: ScrollViewProxy) {
         let index = store.currentTrackNumber - 1
@@ -82,7 +97,7 @@ private struct QueueRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            ArtworkView(url: item.artworkURL(host: host), cornerRadius: 5)
+            ArtworkView(url: item.artworkURL(host: host), cornerRadius: 8, seed: item.title)
                 .frame(width: 46, height: 46)
                 .overlay {
                     if isCurrent {
@@ -105,6 +120,12 @@ private struct QueueRow: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.45))
             }
+            // 並べ替えられることを示すつまみ（長押しでドラッグ）
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.white.opacity(0.35))
+                .padding(.leading, 4)
+                .accessibilityHidden(true)
         }
         .foregroundStyle(.white)
         .opacity(isPast ? 0.45 : 1)

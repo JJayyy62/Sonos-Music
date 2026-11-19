@@ -3,16 +3,25 @@ import SwiftUI
 
 struct SearchView: View {
     enum Scope: String, CaseIterable, Identifiable {
-        case appleMusic = "Apple Music"
-        case library = "ライブラリ"
+        case appleMusic, spotify, amazonMusic, library
         var id: String { rawValue }
+
+        var service: StreamingService? { StreamingService(rawValue: rawValue) }
+        var title: String { service?.displayName ?? "ライブラリ" }
+        var tint: Color { service?.tint ?? Theme.accent }
     }
 
     @Environment(SonosStore.self) private var store
     @Environment(AppleMusicService.self) private var music
+    @Environment(SpotifyService.self) private var spotify
     @State private var query = ""
-    @State private var scope: Scope = .appleMusic
+    @AppStorage("searchScope") private var scope: Scope = .appleMusic
     @State private var results = AppleMusicSearchResults()
+    @State private var spotifyResults = CatalogSearchResults()
+    /// MusicKit が使えないときの Apple Music 検索結果（公開検索API）
+    @State private var appleFallbackResults = CatalogSearchResults()
+    @State private var searchError: String?
+    @State private var showLink = false
     @State private var libraryResults: [LibrarySection] = []
 
     struct LibrarySection: Identifiable {
@@ -24,20 +33,31 @@ struct SearchView: View {
 
     var body: some View {
         List {
-            Picker("検索対象", selection: $scope) {
-                ForEach(Scope.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .listRowSeparator(.hidden)
+            ChipBar(items: Scope.allCases.map { .init(value: $0, title: $0.title, tint: $0.tint) }, selection: $scope)
+                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 8, trailing: 0))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
 
             switch scope {
             case .appleMusic: appleMusicResults
+            case .spotify: spotifyResultList
+            case .amazonMusic: amazonResults
             case .library: libraryResultList
             }
         }
         .listStyle(.plain)
+        .inkBackground()
         .navigationTitle("検索")
-        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "アーティスト、曲、アルバムなど")
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: prompt)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { showLink = true } label: { Image(systemName: "link") }
+                    .accessibilityLabel("リンクから再生")
+            }
+        }
+        .sheet(isPresented: $showLink) {
+            LinkPlaySheet(preferred: scope.service).presentationDetents([.medium, .large])
+        }
         .overlay {
             if searching { ProgressView() }
         }
@@ -45,6 +65,9 @@ struct SearchView: View {
             let term = query.trimmingCharacters(in: .whitespaces)
             guard !term.isEmpty else {
                 results = AppleMusicSearchResults()
+                spotifyResults = CatalogSearchResults()
+                appleFallbackResults = CatalogSearchResults()
+                searchError = nil
                 libraryResults = []
                 return
             }
@@ -54,10 +77,128 @@ struct SearchView: View {
             defer { searching = false }
             switch scope {
             case .appleMusic:
-                guard music.isAuthorized else { return }
-                if let found = try? await music.search(term), !Task.isCancelled { results = found }
+                searchError = nil
+                if !music.usesFallbackSearch {
+                    do {
+                        let found = try await music.search(term)
+                        if !Task.isCancelled {
+                            results = found
+                            appleFallbackResults = CatalogSearchResults()
+                        }
+                        return
+                    } catch {
+                        // 開発者トークンが取れないなどで MusicKit が使えない → 公開検索APIで探す
+                    }
+                }
+                do {
+                    let found = try await ITunesCatalog.search(term)
+                    if !Task.isCancelled {
+                        results = AppleMusicSearchResults()
+                        appleFallbackResults = found
+                    }
+                } catch {
+                    if !Task.isCancelled { searchError = "Apple Musicを検索できませんでした（\(error.localizedDescription)）" }
+                }
+            case .spotify:
+                guard spotify.isConnected else { return }
+                do {
+                    let found = try await spotify.search(term)
+                    if !Task.isCancelled { spotifyResults = found }
+                } catch {
+                    if !Task.isCancelled { store.show(error) }
+                }
+            case .amazonMusic:
+                break
             case .library:
                 await searchLibrary(term)
+            }
+        }
+    }
+
+    private var prompt: String {
+        switch scope {
+        case .amazonMusic: return "お気に入りを絞り込む"
+        case .library: return "ライブラリのアーティスト、曲、アルバム"
+        default: return "\(scope.title)のアーティスト、曲、アルバムなど"
+        }
+    }
+
+    // MARK: Spotify
+
+    @ViewBuilder
+    private var spotifyResultList: some View {
+        if !spotify.isConnected {
+            ServiceConnectCard(service: .spotify)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+        } else {
+            catalogResultList(spotifyResults)
+        }
+    }
+
+    /// Spotify と Apple Music（公開検索API）の共通の結果表示
+    @ViewBuilder
+    private func catalogResultList(_ found: CatalogSearchResults) -> some View {
+        if !found.tracks.isEmpty {
+            Section("曲") {
+                ForEach(found.tracks) { track in CatalogTrackButton(track: track) }
+            }
+        }
+        if !found.albums.isEmpty {
+            Section("アルバム") {
+                ForEach(found.albums) { album in collectionLink(album) }
+            }
+        }
+        if !found.playlists.isEmpty {
+            Section("プレイリスト") {
+                ForEach(found.playlists) { playlist in collectionLink(playlist) }
+            }
+        }
+        if !found.artists.isEmpty {
+            Section("アーティスト") {
+                ForEach(found.artists) { artist in
+                        NavigationLink {
+                            CatalogArtistView(artist: artist)
+                        } label: {
+                            HStack(spacing: 12) {
+                                ArtworkView(url: artist.artworkURL, cornerRadius: 24, placeholderSymbol: "music.mic", seed: artist.name)
+                                    .frame(width: 48, height: 48)
+                                Text(artist.name)
+                            }
+                        }
+                    }
+                }
+            }
+    }
+
+    private func collectionLink(_ collection: CatalogCollection) -> some View {
+        NavigationLink {
+            CatalogCollectionView(collection: collection)
+        } label: {
+            TrackRow(title: collection.title, subtitle: collection.subtitle, artworkURL: collection.artworkURL)
+        }
+        .contextMenu { EnqueueMenu(content: collection.content) }
+    }
+
+    // MARK: Amazon Music
+
+    @ViewBuilder
+    private var amazonResults: some View {
+        ServiceConnectCard(service: .amazonMusic)
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+        let term = query.trimmingCharacters(in: .whitespaces).lowercased()
+        let favorites = store.favorites(for: .amazonMusic)
+            .filter { term.isEmpty || $0.title.lowercased().contains(term) }
+        if !favorites.isEmpty {
+            Section("Sonosのお気に入り") {
+                ForEach(favorites) { favorite in
+                    Button { store.playFavorite(favorite) } label: {
+                        TrackRow(title: favorite.title, subtitle: favorite.serviceDescription,
+                                 artworkURL: favorite.artworkURL(host: store.artworkHost))
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
     }
@@ -66,9 +207,22 @@ struct SearchView: View {
 
     @ViewBuilder
     private var appleMusicResults: some View {
-        if !music.isAuthorized {
-            AppleMusicConnectCard()
+        if let searchError {
+            Label(searchError, systemImage: "exclamationmark.triangle")
+                .font(.subheadline)
+                .foregroundStyle(Theme.textSecondary)
                 .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+        }
+        if music.usesFallbackSearch || !appleFallbackResults.isEmpty {
+            if !query.isEmpty, !appleFallbackResults.isEmpty {
+                Text("簡易検索で表示しています（プレイリストは検索できません）。設定 > 音楽サービス > Apple Music で理由を確認できます。")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+            }
+            catalogResultList(appleFallbackResults)
         } else {
             if !results.songs.isEmpty {
                 Section("曲") {
@@ -108,7 +262,7 @@ struct SearchView: View {
                             AppleMusicArtistView(artist: artist)
                         } label: {
                             HStack(spacing: 12) {
-                                ArtworkView(url: artist.artwork?.url(width: 120, height: 120), cornerRadius: 24, placeholderSymbol: "music.mic")
+                                ArtworkView(url: artist.artwork?.url(width: 120, height: 120), cornerRadius: 24, placeholderSymbol: "music.mic", seed: artist.name)
                                     .frame(width: 48, height: 48)
                                 Text(artist.name)
                             }

@@ -42,7 +42,11 @@ final class SonosStore {
     private enum Keys {
         static let selected = "selectedCoordinator"
         static let hosts = "knownHosts"
+        /// 旧バージョンの Apple Music 用キー（そのまま Apple Music の手動指定として使う）
         static let serialOverride = "appleMusicSerialOverride"
+        static func serialOverride(_ service: StreamingService) -> String {
+            service == .appleMusic ? serialOverride : "serialOverride.\(service.rawValue)"
+        }
     }
 
     // MARK: Topology
@@ -82,7 +86,10 @@ final class SonosStore {
     private(set) var favorites: [DIDLItem] = []
     private(set) var sleepTimerRemaining: Int?
     private(set) var crossfade = false
-    private(set) var appleMusicSerialDetected: Int?
+    /// サービスごとに自動検出した Sonos のアカウント番号
+    private(set) var detectedSerials: [StreamingService: Int] = [:]
+    /// Sonos に登録されていると分かったサービス（アカウント一覧・お気に入り・キューから推定）
+    private(set) var linkedServices: Set<StreamingService> = []
     private(set) var toast: String?
     let lyrics = LyricsStore()
 
@@ -101,9 +108,19 @@ final class SonosStore {
         return max(0, value)
     }
 
-    var appleMusicSerial: Int {
-        let override = UserDefaults.standard.integer(forKey: Keys.serialOverride)
-        return override > 0 ? override : (appleMusicSerialDetected ?? 1)
+    /// サービスの再生に使うアカウント（手動指定 → 自動検出 → 既定値の順）
+    func account(for service: StreamingService) -> ServiceAccount {
+        let override = UserDefaults.standard.integer(forKey: Keys.serialOverride(service))
+        let serial = override > 0 ? override : (detectedSerials[service] ?? 1)
+        return ServiceAccount(serial: serial, desc: serviceDescs[service] ?? service.defaultDesc)
+    }
+
+    static func serialOverrideKey(_ service: StreamingService) -> String { Keys.serialOverride(service) }
+
+    /// 再生中の曲がどのサービスのものか
+    var currentService: StreamingService? {
+        guard let track else { return nil }
+        return StreamingService.detect(in: track.uri) ?? StreamingService.detect(in: track.rawMetadata)
     }
 
     // MARK: Internal bookkeeping
@@ -120,7 +137,7 @@ final class SonosStore {
     @ObservationIgnored private var needsVolumeSnapshot = true
     @ObservationIgnored private var memberSenders: [String: LatestValueSender] = [:]
     @ObservationIgnored private var deviceCache: [String: DeviceDescription] = [:]
-    @ObservationIgnored private var appleMusicDesc: String?
+    @ObservationIgnored private var serviceDescs: [StreamingService: String] = [:]
     @ObservationIgnored private var didInitialLoad = false
     @ObservationIgnored private var groupVolumeSender: LatestValueSender!
 
@@ -294,9 +311,7 @@ final class SonosStore {
         case .tv, .lineIn:
             lyrics.clear()
         }
-        if appleMusicSerialDetected == nil, let serial = AppleMusicSonos.serial(in: track.uri) {
-            appleMusicSerialDetected = serial
-        }
+        learnAccounts(from: [track.uri, track.rawMetadata])
         let identity = track.identity
         Task {
             let resolved = await self.resolveQuality(track, group: group)
@@ -340,7 +355,7 @@ final class SonosStore {
             didInitialLoad = true
             Task {
                 await self.loadFavorites()
-                await self.detectAppleMusicAccount()
+                await self.detectServiceAccounts()
             }
         }
     }
@@ -679,12 +694,21 @@ final class SonosStore {
     }
 
     func playAppleMusic(_ content: AppleMusicSonos.Content, startIndex: Int = 0, shuffle: Bool? = nil) {
-        let candidates = AppleMusicSonos.candidates(content, serial: appleMusicSerial, desc: appleMusicDesc)
-        replaceQueueAndPlay(candidates: candidates, startTrack: startIndex + 1, shuffle: shuffle)
+        play(content.serviceContent, startIndex: startIndex, shuffle: shuffle)
     }
 
     func enqueueAppleMusic(_ content: AppleMusicSonos.Content, mode: EnqueueMode) {
-        enqueue(candidates: AppleMusicSonos.candidates(content, serial: appleMusicSerial, desc: appleMusicDesc), mode: mode)
+        enqueue(content.serviceContent, mode: mode)
+    }
+
+    /// Apple Music / Spotify / Amazon Music の曲・アルバム・プレイリストを、Sonosに登録済みのアカウントで再生する
+    func play(_ content: ServiceContent, startIndex: Int = 0, shuffle: Bool? = nil) {
+        let candidates = SonosServiceURI.candidates(for: content, account: account(for: content.service))
+        replaceQueueAndPlay(candidates: candidates, startTrack: startIndex + 1, shuffle: shuffle)
+    }
+
+    func enqueue(_ content: ServiceContent, mode: EnqueueMode) {
+        enqueue(candidates: SonosServiceURI.candidates(for: content, account: account(for: content.service)), mode: mode)
     }
 
     // MARK: - Browse
@@ -697,22 +721,39 @@ final class SonosStore {
     func loadFavorites() async {
         guard let result = try? await browse("FV:2", count: 200) else { return }
         favorites = result.items
+        learnAccounts(from: result.items.flatMap { [$0.resURI ?? "", $0.resMD ?? ""] })
     }
 
-    private func detectAppleMusicAccount() async {
+    /// お気に入りをサービスで絞り込む（nil はすべて）
+    func favorites(for service: StreamingService?) -> [DIDLItem] {
+        guard let service else { return favorites }
+        return favorites.filter { StreamingService.detect($0) == service }
+    }
+
+    private func detectServiceAccounts() async {
         guard let client = coordinatorClient else { return }
-        if let accounts = try? await client.accounts(),
-           let account = accounts.first(where: { $0.type == AppleMusicSonos.serviceType }) {
-            appleMusicSerialDetected = account.serial
+        if let accounts = try? await client.accounts() {
+            for service in StreamingService.allCases {
+                if let account = accounts.first(where: { $0.type == service.sonosServiceType }) {
+                    linkedServices.insert(service)
+                    if detectedSerials[service] == nil { detectedSerials[service] = account.serial }
+                }
+            }
         }
         if queue.isEmpty { await refreshQueue() }
-        let texts = favorites.flatMap { [$0.resURI ?? "", $0.resMD ?? ""] } + queue.map { $0.resURI ?? "" }
-        for text in texts {
-            if appleMusicSerialDetected == nil, let serial = AppleMusicSonos.serial(in: text) {
-                appleMusicSerialDetected = serial
+        learnAccounts(from: favorites.flatMap { [$0.resURI ?? "", $0.resMD ?? ""] } + queue.map { $0.resURI ?? "" })
+    }
+
+    /// お気に入りや再生中の URI から、サービスごとのアカウント番号と desc を覚える
+    private func learnAccounts(from texts: [String]) {
+        for text in texts where !text.isEmpty {
+            guard let service = StreamingService.detect(in: text) else { continue }
+            linkedServices.insert(service)
+            if detectedSerials[service] == nil, let serial = service.serial(in: text) {
+                detectedSerials[service] = serial
             }
-            if appleMusicDesc == nil, let desc = AppleMusicSonos.desc(in: text) {
-                appleMusicDesc = desc
+            if serviceDescs[service] == nil, let desc = service.desc(in: text) {
+                serviceDescs[service] = desc
             }
         }
     }

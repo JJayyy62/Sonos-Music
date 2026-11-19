@@ -213,8 +213,28 @@ final class LyricsStore {
     }
 
     private(set) var state: State = .idle
-    /// 表示タイミングの補正（秒）。プラスで歌詞が早く進む
-    private(set) var offset: Double = UserDefaults.standard.double(forKey: "lyricsOffset")
+    /// 常にかける基準の補正（秒）。Sonos の再生位置の取得遅れを見込んで歌詞を少し早めに進める。
+    /// 画面に出す補正値はこれを 0.0 として表す
+    static let baseOffset = 0.6
+
+    /// 利用者が設定する補正（秒、基準からの差）。プラスで歌詞が早く進む
+    private(set) var offset: Double = LyricsStore.loadOffset()
+
+    /// 実際に歌詞の表示にかける補正（基準 + 利用者の補正）
+    var timingOffset: Double { Self.baseOffset + offset }
+
+    private static let offsetKey = "lyricsOffsetAdjustment"
+
+    /// 以前の保存値（"lyricsOffset" は実際にかける補正そのもの）があれば、基準からの差に置き換えて引き継ぐ
+    private static func loadOffset() -> Double {
+        let defaults = UserDefaults.standard
+        if let value = defaults.object(forKey: offsetKey) as? Double { return value }
+        guard let legacy = defaults.object(forKey: "lyricsOffset") as? Double else { return 0 }
+        let migrated = ((legacy - baseOffset) * 10).rounded() / 10
+        defaults.set(migrated, forKey: offsetKey)
+        defaults.removeObject(forKey: "lyricsOffset")
+        return migrated
+    }
 
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var cache: [String: State] = [:]
@@ -228,7 +248,7 @@ final class LyricsStore {
 
     func setOffset(_ value: Double) {
         offset = (value * 10).rounded() / 10
-        UserDefaults.standard.set(offset, forKey: "lyricsOffset")
+        UserDefaults.standard.set(offset, forKey: Self.offsetKey)
     }
 
     func load(title: String, artist: String, album: String, duration: Double) {
