@@ -59,7 +59,7 @@ enum AudioQualityDetector {
         if lossless {
             let hiRes = (bits ?? 16) > 16 || (rate ?? 44_100) > 48_000
             return AudioQuality(badge: hiRes ? .hiResLossless : .lossless,
-                                title: hiRes ? "ハイレゾロスレス" : "ロスレス",
+                                title: hiRes ? "Hi-Res Lossless" : "Lossless",
                                 formatDetail: detail, source: .stream)
         }
         if mime.contains("eac3") || mime.contains("ec-3") || mime.contains("ac3") {
@@ -137,7 +137,7 @@ enum AudioQualityDetector {
             if hiRes {
                 notes.append("Sonosの再生は最大24ビット/48kHzのため、ハイレゾ音源は48kHz以下で再生されます。")
             }
-            return AudioQuality(badge: .lossless, title: "ロスレス",
+            return AudioQuality(badge: .lossless, title: "Lossless",
                                 formatDetail: hiRes ? "ALAC（音源は最大24ビット/192kHz）" : "ALAC（最大24ビット/48kHz）",
                                 source: .appleMusicCatalog, notes: notes)
         }

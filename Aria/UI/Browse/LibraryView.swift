@@ -215,8 +215,8 @@ struct AlbumHeader: View {
     static func label(for badge: AudioQuality.Badge) -> String {
         switch badge {
         case .dolbyAtmos: return "Dolby Atmos"
-        case .hiResLossless: return "ハイレゾロスレス"
-        case .lossless: return "ロスレス"
+        case .hiResLossless: return "Hi-Res Lossless"
+        case .lossless: return "Lossless"
         case .dolbyAudio: return "Dolby Audio"
         case .surround: return "サラウンド"
         }
