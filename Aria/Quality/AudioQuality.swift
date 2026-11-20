@@ -16,10 +16,11 @@ struct AudioQuality: Equatable, Sendable {
     }
 
     enum Source: Sendable {
-        case stream, homeTheater, appleMusicCatalog
+        case sonos, stream, homeTheater, appleMusicCatalog
 
         var label: String {
             switch self {
+            case .sonos: return "Sonos（純正Sonosアプリと同じ情報）"
             case .stream: return "Sonosが受信しているストリーム情報"
             case .homeTheater: return "サウンドバーのHDMI / 光入力情報"
             case .appleMusicCatalog: return "Apple Musicのカタログ情報"
@@ -37,6 +38,33 @@ struct AudioQuality: Equatable, Sendable {
 enum AudioQualityDetector {
     private static let losslessMimes = ["flac", "x-flac", "alac", "x-alac", "wav", "x-wav", "wave", "aiff", "x-aiff", "l16", "l24", "dsd"]
     private static let losslessExtensions = ["flac", "alac", "wav", "aif", "aiff", "dsf", "dff"]
+
+    // MARK: Sonos local API（純正アプリと同じ情報）
+
+    /// スピーカーが報告する品質（ビット深度・サンプルレート・ロスレス・空間オーディオ）から表示を作る。
+    /// ハイレゾの区別は Apple Music と同じく、サンプルレートが 48kHz を超えるかどうかで決める
+    static func fromSonos(_ quality: SonosLocalAPI.TrackQuality) -> AudioQuality? {
+        var parts: [String] = []
+        if let codec = quality.codec, !codec.isEmpty { parts.append(codec.uppercased()) }
+        if let bits = quality.bitDepth { parts.append("\(bits)ビット") }
+        if let rate = quality.sampleRate {
+            let khz = Double(rate) / 1000
+            parts.append(khz == khz.rounded() ? "\(Int(khz))kHz" : String(format: "%.1fkHz", khz))
+        }
+        let detail = parts.isEmpty ? nil : parts.joined(separator: " / ")
+
+        if quality.immersive == true {
+            return AudioQuality(badge: .dolbyAtmos, title: "Dolby Atmos", formatDetail: detail, source: .sonos)
+        }
+        if quality.lossless == true {
+            let hiRes = (quality.sampleRate ?? 44_100) > 48_000
+            return AudioQuality(badge: hiRes ? .hiResLossless : .lossless,
+                                title: hiRes ? "Hi-Res Lossless" : "Lossless",
+                                formatDetail: detail, source: .sonos)
+        }
+        guard detail != nil || quality.lossless == false else { return nil }
+        return AudioQuality(badge: nil, title: "標準音質", formatDetail: detail, source: .sonos)
+    }
 
     // MARK: Sonos stream metadata
 

@@ -143,7 +143,7 @@ struct MiniPlayer: View {
                 .frame(width: 40, height: 40)
                 .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
             VStack(alignment: .leading, spacing: 1) {
-                Text(store.track?.title ?? "再生停止中")
+                Text(store.displayTitle ?? "再生停止中")
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                 HStack(spacing: 5) {
@@ -184,7 +184,7 @@ struct MiniPlayer: View {
 
     private var subtitle: String {
         let room = store.selectedGroup?.name ?? "スピーカー未接続"
-        guard let artist = store.track?.artist, !artist.isEmpty else { return room }
+        guard let artist = store.displayArtist, !artist.isEmpty else { return room }
         return artist
     }
 }

@@ -83,6 +83,8 @@ final class SonosStore {
     private(set) var currentTrackNumber = 0
     private(set) var mediaInfo: MediaInfo?
     private(set) var quality: AudioQuality?
+    /// 再生中の曲の、端末の言語での表記（Sonos がローマ字で返す日本の曲名など）。なければ nil
+    private(set) var trackNames: TrackNames?
     private(set) var favorites: [DIDLItem] = []
     private(set) var sleepTimerRemaining: Int?
     private(set) var crossfade = false
@@ -99,6 +101,11 @@ final class SonosStore {
     var isPlaying: Bool { transportState == .playing || transportState == .transitioning }
     var isPlayingQueue: Bool { mediaInfo?.currentURI.hasPrefix("x-rincon-queue:") ?? false }
     var duration: Double { track?.duration ?? 0 }
+
+    /// 画面に出す曲名・アーティスト名・アルバム名（日本語表記が見つかればそれを使う）
+    var displayTitle: String? { trackNames?.title ?? track?.title }
+    var displayArtist: String? { trackNames?.artist ?? track?.artist }
+    var displayAlbum: String? { trackNames?.album ?? track?.album }
 
     /// 再生位置（ポーリングの間はローカルで補間する）
     func position(at date: Date = Date()) -> Double {
@@ -301,6 +308,7 @@ final class SonosStore {
 
     private func trackDidChange() {
         quality = nil
+        trackNames = nil
         guard let track, let group = selectedGroup else {
             lyrics.clear()
             return
@@ -314,8 +322,34 @@ final class SonosStore {
         learnAccounts(from: [track.uri, track.rawMetadata])
         let identity = track.identity
         Task {
-            let resolved = await self.resolveQuality(track, group: group)
+            var resolved = await self.resolveQuality(track, group: group)
+            if resolved?.badge == nil {
+                // 曲が変わった直後はスピーカーがまだ品質を知らないことがあるので、少し待ってもう一度
+                try? await Task.sleep(for: .seconds(3))
+                guard self.track?.identity == identity else { return }
+                resolved = await self.resolveQuality(track, group: group) ?? resolved
+            }
             if self.track?.identity == identity { self.quality = resolved }
+        }
+        localizeNames(track)
+    }
+
+    /// Apple Music の曲名がローマ字なら、カタログで日本語表記を探す
+    private func localizeNames(_ track: TrackInfo) {
+        guard track.kind == .track, StreamingService.detect(in: track.uri) == .appleMusic,
+              TrackNameLocalizer.needsLookup(title: track.title, artist: track.artist) else { return }
+        let identity = track.identity
+        Task {
+            let names = await TrackNameLocalizer.shared.names(
+                title: track.title, artist: track.artist, album: track.album, duration: track.duration,
+                catalogSongID: AppleMusicSonos.catalogSongID(in: track.uri))
+            guard let names, self.track?.identity == identity else { return }
+            self.trackNames = names
+            // ローマ字では歌詞が見つからなかった曲は、日本語表記でもう一度探す
+            if case .notFound = self.lyrics.state {
+                self.lyrics.load(title: names.title, artist: names.artist, album: names.album ?? track.album,
+                                 duration: track.duration)
+            }
         }
     }
 
@@ -783,6 +817,11 @@ final class SonosStore {
 
     private func resolveQuality(_ track: TrackInfo, group: SonosGroup) async -> AudioQuality? {
         if track.kind == .tv { return await homeTheaterQuality(group) }
+        // 純正 Sonos アプリと同じ情報（スピーカーが実際に受け取っている音源の品質）
+        if let reported = await SonosLocalAPI.shared.currentTrack(host: group.coordinator.host)?.quality,
+           let sonos = AudioQualityDetector.fromSonos(reported) {
+            return sonos
+        }
         let streamQuality = AudioQualityDetector.fromStream(track)
         if streamQuality?.badge != nil { return streamQuality }
         if let songID = AppleMusicSonos.catalogSongID(in: track.uri) {

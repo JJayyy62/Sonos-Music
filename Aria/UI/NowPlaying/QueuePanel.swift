@@ -95,6 +95,9 @@ private struct QueueRow: View {
     let isPlaying: Bool
     let isPast: Bool
 
+    /// 日本語表記（Sonos がローマ字で返す Apple Music の曲）。見えている行だけ調べる
+    @State private var names: TrackNames?
+
     var body: some View {
         HStack(spacing: 12) {
             ArtworkView(url: item.artworkURL(host: host), cornerRadius: 8, seed: item.title)
@@ -108,8 +111,8 @@ private struct QueueRow: View {
                     }
                 }
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.title).lineLimit(1)
-                Text(item.artist ?? "")
+                Text(names?.title ?? item.title).lineLimit(1)
+                Text(names?.artist ?? item.artist ?? "")
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.55))
                     .lineLimit(1)
@@ -130,5 +133,15 @@ private struct QueueRow: View {
         .foregroundStyle(.white)
         .opacity(isPast ? 0.45 : 1)
         .contentShape(Rectangle())
+        .task(id: item.id) { await localize() }
+    }
+
+    private func localize() async {
+        let uri = item.resURI ?? ""
+        guard StreamingService.detect(in: uri) == .appleMusic,
+              TrackNameLocalizer.needsLookup(title: item.title, artist: item.artist ?? "") else { return }
+        names = await TrackNameLocalizer.shared.names(
+            title: item.title, artist: item.artist ?? "", album: item.album,
+            duration: item.durationSeconds ?? 0, catalogSongID: AppleMusicSonos.catalogSongID(in: uri))
     }
 }

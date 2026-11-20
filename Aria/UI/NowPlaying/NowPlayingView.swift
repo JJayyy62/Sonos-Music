@@ -108,10 +108,10 @@ struct NowPlayingView: View {
                 .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
                 .onTapGesture { setPanel(.none) }
             VStack(alignment: .leading, spacing: 2) {
-                Text(store.track?.title ?? "再生停止中")
+                Text(store.displayTitle ?? "再生停止中")
                     .font(.headline)
                     .lineLimit(1)
-                Text(store.track?.artist ?? "")
+                Text(store.displayArtist ?? "")
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.6))
                     .lineLimit(1)
@@ -164,7 +164,7 @@ struct PlayerControls: View {
     private var titleRow: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(store.track?.title ?? "再生停止中")
+                Text(store.displayTitle ?? "再生停止中")
                     .font(.title3.weight(.bold))
                     .lineLimit(1)
                 HStack(spacing: 8) {
@@ -186,7 +186,8 @@ struct PlayerControls: View {
     private var subtitle: String {
         guard let track = store.track else { return store.selectedGroup?.name ?? "" }
         if track.kind == .tv { return store.selectedGroup?.name ?? "" }
-        return track.artist.isEmpty ? (track.stationName ?? "") : track.artist
+        let artist = store.displayArtist ?? track.artist
+        return artist.isEmpty ? (track.stationName ?? "") : artist
     }
 
     private var transport: some View {
