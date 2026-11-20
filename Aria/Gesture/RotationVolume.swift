@@ -19,6 +19,12 @@ final class RotationVolumeController: NSObject, UIGestureRecognizerDelegate {
     private var startVolume = 0
     private var engaged = false
     private var hideTask: Task<Void, Never>?
+    /// 音量調節中に止めているほかのジェスチャー（スクロール・タップ・スライダーなど）
+    private var suspendedRecognizers: [UIGestureRecognizer] = []
+    /// 画面に触れている指を数える（すべての指が離れるまで、止めた操作を戻さない）
+    private let touchWatcher = TouchWatcher()
+    /// 回転は終わったが、まだ画面に指が残っているので戻すのを待っている
+    private var resumeWhenTouchesEnd = false
 
     /// 回転開始とみなす角度（ピンチ等の誤動作防止）
     private let engageThreshold = 8.0
@@ -37,11 +43,16 @@ final class RotationVolumeController: NSObject, UIGestureRecognizerDelegate {
         installedWindow = window
 
         let recognizer = UIRotationGestureRecognizer(target: self, action: #selector(handle(_:)))
-        recognizer.cancelsTouchesInView = false
+        // 2本指の回転を認識した瞬間に、指の下にあるボタン・タイル・スライダーへのタッチを取り消す。
+        // これで指を離したときにタップとして扱われない（1本指の操作は回転として認識されないので影響しない）
+        recognizer.cancelsTouchesInView = true
         recognizer.delaysTouchesBegan = false
         recognizer.delaysTouchesEnded = false
         recognizer.delegate = self
         window.addGestureRecognizer(recognizer)
+
+        touchWatcher.onAllTouchesEnded = { [weak self] in self?.touchesDidEnd() }
+        window.addGestureRecognizer(touchWatcher)
 
         if let scene = window.windowScene {
             let overlay = PassthroughWindow(windowScene: scene)
@@ -63,6 +74,8 @@ final class RotationVolumeController: NSObject, UIGestureRecognizerDelegate {
         switch recognizer.state {
         case .began:
             engaged = false
+            // 2本指の回転を検出した時点でほかの操作を止める（音量が変わるのは engageThreshold を超えてから）
+            suspendOtherGestures(except: recognizer)
             startVolume = store.groupVolume
         case .changed:
             let degrees = Double(recognizer.rotation) * 180 / .pi
@@ -77,7 +90,9 @@ final class RotationVolumeController: NSObject, UIGestureRecognizerDelegate {
                 hud.volume = startVolume
                 hud.visible = true
             }
-            let effective = degrees - (degrees > 0 ? engageThreshold : -engageThreshold)
+            // 開始位置の前後 engageThreshold 度は「動かしていない」扱いにする。
+            // 回して戻したとき、この範囲に入れば開始時の音量にぴったり戻る
+            let effective = degrees >= 0 ? max(0, degrees - engageThreshold) : min(0, degrees + engageThreshold)
             let steps = Int((effective / degreesPerStep).rounded(.towardZero))
             let target = max(0, min(100, startVolume + steps))
             if target != store.groupVolume {
@@ -86,6 +101,12 @@ final class RotationVolumeController: NSObject, UIGestureRecognizerDelegate {
             }
             hud.volume = target
         case .ended, .cancelled, .failed:
+            // 回転は1本目の指が離れた時点で終わるので、残りの指も離れてから操作を戻す
+            if touchWatcher.activeTouches == 0 {
+                resumeOtherGestures()
+            } else {
+                resumeWhenTouchesEnd = true
+            }
             guard engaged else { return }
             engaged = false
             hideTask?.cancel()
@@ -99,10 +120,92 @@ final class RotationVolumeController: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
+    /// 回転を検出するまではほかの操作と同時に認識させる（1本指のスクロールやタップを邪魔しない）。
+    /// 検出したあとは suspendOtherGestures でほかを止める
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        true
+        suspendedRecognizers.isEmpty || other === touchWatcher
     }
+
+    private func touchesDidEnd() {
+        guard resumeWhenTouchesEnd else { return }
+        resumeWhenTouchesEnd = false
+        resumeOtherGestures()
+    }
+
+    // MARK: - ほかの操作を止める
+
+    /// アプリのすべてのウインドウ（シートやフルスクリーンの再生画面を含む）のジェスチャーを一時的に無効にする。
+    /// 無効にすると進行中の操作（スクロール・ボタンの押下・スライダーのドラッグ）はキャンセルされ、
+    /// 指を離すまで新しい操作も始まらない
+    private func suspendOtherGestures(except own: UIGestureRecognizer) {
+        resumeOtherGestures()
+        guard let windows = installedWindow?.windowScene?.windows else { return }
+        for window in windows where window !== hudWindow {
+            collect(in: window, except: own)
+        }
+    }
+
+    private func collect(in view: UIView, except own: UIGestureRecognizer) {
+        for recognizer in view.gestureRecognizers ?? []
+        where recognizer !== own && recognizer !== touchWatcher && recognizer.isEnabled {
+            recognizer.isEnabled = false
+            suspendedRecognizers.append(recognizer)
+        }
+        for subview in view.subviews {
+            collect(in: subview, except: own)
+        }
+    }
+
+    private func resumeOtherGestures() {
+        for recognizer in suspendedRecognizers {
+            recognizer.isEnabled = true
+        }
+        suspendedRecognizers.removeAll()
+    }
+}
+
+/// 画面に触れている指の数を数えるだけの認識器。自分では何も認識せず、ほかのタッチも邪魔しない
+private final class TouchWatcher: UIGestureRecognizer {
+    private(set) var activeTouches = 0
+    var onAllTouchesEnded: (() -> Void)?
+
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+    }
+
+    convenience init() { self.init(target: nil, action: nil) }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        activeTouches += touches.count
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        finish(touches)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        finish(touches)
+    }
+
+    private func finish(_ touches: Set<UITouch>) {
+        activeTouches = max(0, activeTouches - touches.count)
+        if activeTouches == 0 {
+            state = .failed
+            onAllTouchesEnded?()
+        }
+    }
+
+    override func reset() {
+        super.reset()
+        activeTouches = 0
+    }
+
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool { false }
 }
 
 private final class PassthroughWindow: UIWindow {
