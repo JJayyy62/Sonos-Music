@@ -46,9 +46,12 @@ struct SyncedLyricsView: View {
     @Environment(SonosStore.self) private var store
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 0.1, paused: !store.isPlaying)) { context in
+        // 単語単位の歌詞は滑らかに光らせるため更新頻度を上げる
+        let wordSynced = lines.contains { $0.isWordSynced }
+        TimelineView(.animation(minimumInterval: wordSynced ? 1.0 / 30 : 0.1, paused: !store.isPlaying)) { context in
             let time = store.position(at: context.date) + store.lyrics.offset
-            LyricsScroller(lines: lines, activeIndex: LyricLine.activeIndex(in: lines, at: time)) { line in
+            LyricsScroller(lines: lines, activeIndex: LyricLine.activeIndex(in: lines, at: time), time: time,
+                           source: store.lyrics.source) { line in
                 store.seek(to: max(0, line.time - store.lyrics.offset))
             }
         }
@@ -58,6 +61,8 @@ struct SyncedLyricsView: View {
 struct LyricsScroller: View {
     let lines: [LyricLine]
     let activeIndex: Int?
+    let time: Double
+    let source: LyricsSource?
     let onTap: (LyricLine) -> Void
 
     @State private var userScrolling = false
@@ -75,9 +80,16 @@ struct LyricsScroller: View {
                             line: line,
                             isActive: line.id == activeIndex,
                             distance: abs(line.id - (activeIndex ?? 0)),
-                            unblurred: userScrolling)
+                            unblurred: userScrolling,
+                            time: line.id == activeIndex ? time : nil)
                         .id(line.id)
                         .onTapGesture { onTap(line) }
+                    }
+                    if let source {
+                        Text("歌詞提供: \(source.rawValue)")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.4))
+                            .padding(.top, 12)
                     }
                     Color.clear.frame(height: 320)
                 }
@@ -129,6 +141,14 @@ struct LyricLineView: View {
     let isActive: Bool
     let distance: Int
     let unblurred: Bool
+    /// アクティブな行だけに渡す現在時刻（単語の光り方に使う）
+    var time: Double?
+
+    private var alignment: HorizontalAlignment { line.side == .trailing ? .trailing : .leading }
+    private var frameAlignment: Alignment { line.side == .trailing ? .trailing : .leading }
+    private var textAlignment: TextAlignment { line.side == .trailing ? .trailing : .leading }
+    private var anchor: UnitPoint { line.side == .trailing ? .trailing : .leading }
+    private var dimmed: Double { unblurred ? 0.55 : 0.32 }
 
     var body: some View {
         Group {
@@ -140,20 +160,44 @@ struct LyricLineView: View {
                     Color.clear.frame(height: 0)
                 }
             } else {
-                Text(line.text)
-                    .font(.system(size: 30, weight: .bold))
-                    .lineSpacing(2)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: alignment, spacing: 6) {
+                    if !line.text.isEmpty {
+                        lyricText(words: line.words, plain: line.text, baseOpacity: 1)
+                            .font(.system(size: 30, weight: .bold))
+                    }
+                    if !line.backgroundText.isEmpty {
+                        lyricText(words: line.background, plain: line.backgroundText, baseOpacity: 0.75)
+                            .font(.system(size: 21, weight: .semibold))
+                    }
+                }
+                .lineSpacing(2)
+                .multilineTextAlignment(textAlignment)
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .foregroundStyle(.white.opacity(isActive ? 1 : (unblurred ? 0.55 : 0.32)))
         .blur(radius: isActive || unblurred ? 0 : min(Double(distance) * 0.6, 2.4))
-        .scaleEffect(isActive ? 1 : 0.96, anchor: .leading)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .scaleEffect(isActive ? 1 : 0.96, anchor: anchor)
+        .frame(maxWidth: .infinity, alignment: frameAlignment)
+        .padding(line.side == .trailing ? .leading : .trailing, 28)
         .contentShape(Rectangle())
         .animation(.spring(response: 0.45, dampingFraction: 0.8), value: isActive)
         .animation(.easeOut(duration: 0.25), value: unblurred)
+    }
+
+    /// 単語単位の歌詞は、歌われた部分から順に明るくなる（カラオケ風）
+    private func lyricText(words: [LyricWord], plain: String, baseOpacity: Double) -> Text {
+        guard isActive else {
+            return Text(plain).foregroundStyle(Color.white.opacity(dimmed * baseOpacity))
+        }
+        guard let time, !words.isEmpty else {
+            return Text(plain).foregroundStyle(Color.white.opacity(baseOpacity))
+        }
+        return words.reduce(Text(verbatim: "")) { result, word in
+            let progress = word.progress(at: time)
+            let opacity = (0.35 + 0.65 * progress) * baseOpacity
+            let segment = Text(verbatim: word.text).foregroundStyle(Color.white.opacity(opacity))
+            return Text("\(result)\(segment)")
+        }
     }
 }
 

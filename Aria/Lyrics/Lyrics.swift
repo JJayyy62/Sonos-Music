@@ -1,12 +1,47 @@
 import Foundation
 import Observation
 
+/// 単語（音節）単位の歌詞
+struct LyricWord: Equatable, Sendable {
+    let start: Double
+    let end: Double
+    var text: String
+
+    func progress(at time: Double) -> Double {
+        guard end > start else { return time >= start ? 1 : 0 }
+        return min(1, max(0, (time - start) / (end - start)))
+    }
+}
+
 struct LyricLine: Identifiable, Equatable, Sendable {
+    enum Side: Sendable { case leading, trailing }
+
     let id: Int
     let time: Double
     let text: String
+    var endTime: Double?
+    /// 単語単位のタイミング（行単位の歌詞では空）
+    var words: [LyricWord]
+    /// バックコーラス
+    var background: [LyricWord]
+    var backgroundText: String
+    /// デュエットで2人目の歌い手は右寄せ
+    var side: Side
 
-    var isInterlude: Bool { text.isEmpty }
+    init(id: Int, time: Double, text: String, endTime: Double? = nil, words: [LyricWord] = [],
+         background: [LyricWord] = [], backgroundText: String = "", side: Side = .leading) {
+        self.id = id
+        self.time = time
+        self.text = text
+        self.endTime = endTime
+        self.words = words
+        self.background = background
+        self.backgroundText = backgroundText
+        self.side = side
+    }
+
+    var isInterlude: Bool { text.isEmpty && backgroundText.isEmpty }
+    var isWordSynced: Bool { !words.isEmpty }
 
     /// time 以前で最後に始まった行
     static func activeIndex(in lines: [LyricLine], at time: Double) -> Int? {
@@ -22,6 +57,26 @@ struct LyricLine: Identifiable, Equatable, Sendable {
             }
         }
         return answer
+    }
+
+    /// 時刻順に並べ、前奏と長い間奏に「•••」の行を入れて、IDを振り直す
+    static func finalize(_ input: [LyricLine]) -> [LyricLine] {
+        let sorted = input.sorted { $0.time < $1.time }
+        var result: [LyricLine] = []
+        if let first = sorted.first, first.time > 4, !first.isInterlude {
+            result.append(LyricLine(id: 0, time: 0, text: ""))
+        }
+        for (index, line) in sorted.enumerated() {
+            result.append(line)
+            guard !line.isInterlude, let end = line.endTime, index + 1 < sorted.count else { continue }
+            if sorted[index + 1].time - end > 5 {
+                result.append(LyricLine(id: 0, time: end, text: ""))
+            }
+        }
+        return result.enumerated().map { offset, line in
+            LyricLine(id: offset, time: line.time, text: line.text, endTime: line.endTime, words: line.words,
+                      background: line.background, backgroundText: line.backgroundText, side: line.side)
+        }
     }
 }
 
@@ -69,12 +124,37 @@ enum LRCParser {
             for time in times { entries.append((max(0, time - offset), content)) }
         }
 
-        entries.sort { $0.time < $1.time }
-        // 前奏が長い場合は先頭にインタールード（•••）を入れる
-        if let first = entries.first, first.time > 4, !first.text.isEmpty {
-            entries.insert((0, ""), at: 0)
+        return LyricLine.finalize(entries.map { LyricLine(id: 0, time: $0.time, text: $0.text) })
+    }
+}
+
+// MARK: - Sources
+
+enum LyricsSource: String, Sendable {
+    case betterLyrics = "Better Lyrics"
+    case lrclib = "LRCLIB"
+}
+
+enum LyricsService {
+    static let betterLyricsKey = "useBetterLyrics"
+
+    static var useBetterLyrics: Bool {
+        UserDefaults.standard.object(forKey: betterLyricsKey) as? Bool ?? true
+    }
+
+    /// Better Lyrics（単語単位）→ LRCLIB（行単位）の順に探す
+    static func lookup(title: String, artist: String, album: String, duration: Double) async -> (LyricsStore.State, LyricsSource?) {
+        if useBetterLyrics {
+            if case .found(let lines) = await BetterLyricsClient.fetch(title: title, artist: artist, album: album, duration: duration) {
+                return (.synced(lines), .betterLyrics)
+            }
+            if Task.isCancelled { return (.idle, nil) }
         }
-        return entries.enumerated().map { LyricLine(id: $0.offset, time: $0.element.time, text: $0.element.text) }
+        let state = await LRCLIBClient.lookup(title: title, artist: artist, album: album, duration: duration)
+        switch state {
+        case .synced, .plain, .instrumental: return (state, .lrclib)
+        default: return (state, nil)
+        }
     }
 }
 
@@ -213,11 +293,12 @@ final class LyricsStore {
     }
 
     private(set) var state: State = .idle
+    private(set) var source: LyricsSource?
     /// 表示タイミングの補正（秒）。プラスで歌詞が早く進む
     private(set) var offset: Double = UserDefaults.standard.double(forKey: "lyricsOffset")
 
     @ObservationIgnored private var task: Task<Void, Never>?
-    @ObservationIgnored private var cache: [String: State] = [:]
+    @ObservationIgnored private var cache: [String: (State, LyricsSource?)] = [:]
     @ObservationIgnored private var currentKey: String?
     @ObservationIgnored private var lastRequest: (title: String, artist: String, album: String, duration: Double)?
 
@@ -238,20 +319,30 @@ final class LyricsStore {
         lastRequest = (title, artist, album, duration)
         task?.cancel()
 
-        guard !title.isEmpty else { state = .idle; return }
-        if let cached = cache[key] { state = cached; return }
+        guard !title.isEmpty else {
+            state = .idle
+            source = nil
+            return
+        }
+        if let cached = cache[key] {
+            (state, source) = cached
+            return
+        }
 
         state = .loading
+        source = nil
         task = Task { [weak self] in
-            let result = await LRCLIBClient.lookup(title: title, artist: artist, album: album, duration: duration)
+            let (result, source) = await LyricsService.lookup(title: title, artist: artist, album: album, duration: duration)
             guard let self, !Task.isCancelled, self.currentKey == key else { return }
-            if result != .failed && result != .idle { self.cache[key] = result }
+            if result != .failed && result != .idle { self.cache[key] = (result, source) }
             self.state = result
+            self.source = source
         }
     }
 
     func retry() {
         guard let request = lastRequest else { return }
+        cache["\(request.title)|\(request.artist)".lowercased()] = nil
         currentKey = nil
         load(title: request.title, artist: request.artist, album: request.album, duration: request.duration)
     }
@@ -260,5 +351,12 @@ final class LyricsStore {
         task?.cancel()
         currentKey = nil
         state = .idle
+        source = nil
+    }
+
+    /// 取得元の設定を変えたときに呼ぶ
+    func resetCache() {
+        cache.removeAll()
+        retry()
     }
 }
