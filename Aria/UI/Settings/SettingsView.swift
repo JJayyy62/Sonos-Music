@@ -9,6 +9,7 @@ struct SettingsView: View {
     @AppStorage(RotationVolumeController.enabledKey) private var rotationEnabled = true
     @AppStorage(RotationVolumeController.sensitivityKey) private var degreesPerStep = 3.5
     @Environment(SpotifyService.self) private var spotify
+    @AppStorage(LyricsService.betterLyricsKey) private var useBetterLyrics = true
     @State private var manualHost = ""
     @State private var showLink = false
 
@@ -76,6 +77,8 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Better Lyricsを使う（単語単位）", isOn: $useBetterLyrics)
+                        .onChange(of: useBetterLyrics) { _, _ in store.lyrics.resetCache() }
                     HStack {
                         Text("時間補正")
                         Spacer()
@@ -89,7 +92,7 @@ struct SettingsView: View {
                 } header: {
                     Text("歌詞")
                 } footer: {
-                    Text("歌詞はLRCLIB（lrclib.net）のコミュニティデータベースから取得します。歌詞が音より遅れる場合はプラスにしてください。")
+                    Text("まずBetter Lyrics（betterlyrics.org）で単語単位の同期歌詞を探し、見つからないときはLRCLIB（lrclib.net）の行単位の歌詞を使います。Better Lyricsはキャッシュ済みの曲だけがAPIキーなしで取得できるため、曲によってはLRCLIBになります。歌詞が音より遅れる場合は時間補正をプラスにしてください。")
                 }
 
                 Section {
