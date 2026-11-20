@@ -146,6 +146,8 @@ final class SonosStore {
     @ObservationIgnored private var deviceCache: [String: DeviceDescription] = [:]
     @ObservationIgnored private var serviceDescs: [StreamingService: String] = [:]
     @ObservationIgnored private var didInitialLoad = false
+    /// 曲の始まり・再生再開の直後に音質を続けて確認する処理（次の曲に変わったら打ち切る）
+    @ObservationIgnored private var startQualityTask: Task<Void, Never>?
     @ObservationIgnored private var groupVolumeSender: LatestValueSender!
 
     private init() {
@@ -279,6 +281,15 @@ final class SonosStore {
         }
         if track?.kind == .tv, let q = await homeTheaterQuality(group), q != quality {
             quality = q
+        } else if let track, track.kind != .tv, isPlaying {
+            // 曲の始まりはステレオ（Lossless）で届き、少したってから Dolby Atmos に切り替わることがある。
+            // 再生中はスピーカーが報告する品質を見続けて、変わったら表示も合わせる
+            let identity = track.identity
+            if let reported = await SonosLocalAPI.shared.currentTrack(host: group.coordinator.host)?.quality,
+               let latest = AudioQualityDetector.fromSonos(reported),
+               self.track?.identity == identity, latest != quality {
+                quality = latest
+            }
         }
     }
 
@@ -294,7 +305,12 @@ final class SonosStore {
         if Date() >= seekLockUntil {
             reanchor(reported: position.position, force: changed || previousState != transportState || transportState != .playing)
         }
-        if changed { trackDidChange() }
+        if changed {
+            trackDidChange()
+        } else if previousState != .playing, transportState == .playing, let track {
+            // 一時停止から再生を再開したときも、始まりと同じように音質を確かめ直す
+            checkQualityAtStart(track, group: group)
+        }
     }
 
     /// Sonosの再生位置は秒単位で切り捨てられるので、遅れているときだけ前に合わせる
@@ -320,18 +336,26 @@ final class SonosStore {
             lyrics.clear()
         }
         learnAccounts(from: [track.uri, track.rawMetadata])
-        let identity = track.identity
-        Task {
-            var resolved = await self.resolveQuality(track, group: group)
-            if resolved?.badge == nil {
-                // 曲が変わった直後はスピーカーがまだ品質を知らないことがあるので、少し待ってもう一度
-                try? await Task.sleep(for: .seconds(3))
-                guard self.track?.identity == identity else { return }
-                resolved = await self.resolveQuality(track, group: group) ?? resolved
-            }
-            if self.track?.identity == identity { self.quality = resolved }
-        }
+        checkQualityAtStart(track, group: group)
         localizeNames(track)
+    }
+
+    /// 曲が始まった直後は、すぐと 1・2・3・5・7 秒後に音質を確認する。
+    /// 始まりは Lossless（ステレオ）で届き、少し遅れて Dolby Atmos に切り替わることがあるため。
+    /// その後は約 3 秒ごとの定期確認（pollSlow）に引き継ぐ
+    private func checkQualityAtStart(_ track: TrackInfo, group: SonosGroup) {
+        startQualityTask?.cancel()
+        let identity = track.identity
+        startQualityTask = Task {
+            for delay in [0.0, 1, 1, 1, 2, 2] {
+                if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+                guard !Task.isCancelled, self.track?.identity == identity else { return }
+                let resolved = await self.resolveQuality(track, group: group)
+                guard !Task.isCancelled, self.track?.identity == identity else { return }
+                // 分からなかったときは、前に分かった表示を消さない
+                if let resolved, resolved != self.quality { self.quality = resolved }
+            }
+        }
     }
 
     /// Apple Music の曲名がローマ字なら、カタログで日本語表記を探す
