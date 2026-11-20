@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 import Observation
 
 /// 単語（音節）単位の歌詞
@@ -27,9 +28,12 @@ struct LyricLine: Identifiable, Equatable, Sendable {
     var backgroundText: String
     /// デュエットで2人目の歌い手は右寄せ
     var side: Side
+    /// 翻訳（Apple Music のように原文の下に小さく出す）
+    var translation: String?
 
     init(id: Int, time: Double, text: String, endTime: Double? = nil, words: [LyricWord] = [],
-         background: [LyricWord] = [], backgroundText: String = "", side: Side = .leading) {
+         background: [LyricWord] = [], backgroundText: String = "", side: Side = .leading,
+         translation: String? = nil) {
         self.id = id
         self.time = time
         self.text = text
@@ -38,6 +42,34 @@ struct LyricLine: Identifiable, Equatable, Sendable {
         self.background = background
         self.backgroundText = backgroundText
         self.side = side
+        self.translation = translation
+    }
+
+    /// 「原文^翻訳」のように1行に続けて入っている翻訳を、原文と翻訳に分ける。
+    /// 単語単位の歌詞では "^" を含む単語で切り、それ以降の単語を翻訳として扱う
+    func separatingInlineTranslation() -> LyricLine {
+        guard let caret = text.firstIndex(of: "^") else { return self }
+        let original = text[..<caret].trimmingCharacters(in: .whitespacesAndNewlines)
+        let inline = text[text.index(after: caret)...].trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var keptWords = words
+        if let index = words.firstIndex(where: { $0.text.contains("^") }) {
+            keptWords = Array(words[..<index])
+            var word = words[index]
+            if let wordCaret = word.text.firstIndex(of: "^") {
+                word.text = String(word.text[..<wordCaret])
+                if !word.text.trimmingCharacters(in: .whitespaces).isEmpty { keptWords.append(word) }
+            }
+            if let last = keptWords.indices.last {
+                keptWords[last].text = keptWords[last].text.replacingOccurrences(
+                    of: #"\s+$"#, with: "", options: .regularExpression)
+            }
+        }
+        var line = LyricLine(id: id, time: time, text: original, endTime: endTime, words: keptWords,
+                             background: background, backgroundText: backgroundText, side: side,
+                             translation: translation)
+        if line.translation == nil, !inline.isEmpty { line.translation = inline }
+        return line
     }
 
     var isInterlude: Bool { text.isEmpty && backgroundText.isEmpty }
@@ -61,7 +93,7 @@ struct LyricLine: Identifiable, Equatable, Sendable {
 
     /// 時刻順に並べ、前奏と長い間奏に「•••」の行を入れて、IDを振り直す
     static func finalize(_ input: [LyricLine]) -> [LyricLine] {
-        let sorted = input.sorted { $0.time < $1.time }
+        let sorted = input.map { $0.separatingInlineTranslation() }.sorted { $0.time < $1.time }
         var result: [LyricLine] = []
         if let first = sorted.first, first.time > 4, !first.isInterlude {
             result.append(LyricLine(id: 0, time: 0, text: ""))
@@ -75,7 +107,8 @@ struct LyricLine: Identifiable, Equatable, Sendable {
         }
         return result.enumerated().map { offset, line in
             LyricLine(id: offset, time: line.time, text: line.text, endTime: line.endTime, words: line.words,
-                      background: line.background, backgroundText: line.backgroundText, side: line.side)
+                      background: line.background, backgroundText: line.backgroundText, side: line.side,
+                      translation: line.translation)
         }
     }
 }
@@ -137,9 +170,15 @@ enum LyricsSource: String, Sendable {
 
 enum LyricsService {
     static let betterLyricsKey = "useBetterLyrics"
+    static let translateEnglishKey = "translateEnglishLyrics"
 
     static var useBetterLyrics: Bool {
         UserDefaults.standard.object(forKey: betterLyricsKey) as? Bool ?? true
+    }
+
+    /// 英語の歌詞を日本語に翻訳して表示するか（端末の言語が日本語のときだけ）
+    static var translateEnglish: Bool {
+        UserDefaults.standard.object(forKey: translateEnglishKey) as? Bool ?? true
     }
 
     /// Better Lyrics（単語単位）→ LRCLIB（行単位）の順に探す
@@ -294,6 +333,8 @@ final class LyricsStore {
 
     private(set) var state: State = .idle
     private(set) var source: LyricsSource?
+    /// 翻訳を端末で機械翻訳したか（歌詞の下に「翻訳: Apple」と出す）
+    private(set) var machineTranslated = false
     /// 常にかける基準の補正（秒）。Sonos の再生位置の取得遅れを見込んで歌詞を少し早めに進める。
     /// 画面に出す補正値はこれを 0.0 として表す
     static let baseOffset = 0.6
@@ -344,8 +385,10 @@ final class LyricsStore {
             source = nil
             return
         }
+        machineTranslated = false
         if let cached = cache[key] {
             (state, source) = cached
+            machineTranslated = machineTranslatedKeys.contains(key)
             return
         }
 
@@ -360,6 +403,56 @@ final class LyricsStore {
         }
     }
 
+    // MARK: - 英語の歌詞の翻訳
+
+    /// 端末で翻訳した曲（キャッシュから戻したときに「翻訳: Apple」を出すため）
+    @ObservationIgnored private var machineTranslatedKeys: Set<String> = []
+
+    /// 英語の歌詞で、まだ翻訳が付いていないとき、翻訳する行を返す（キーは結果を戻すときの照合用）
+    func englishLinesToTranslate() -> (key: String, lines: [LyricLine])? {
+        guard LyricsService.translateEnglish,
+              Locale.current.language.languageCode?.identifier == "ja",
+              let key = currentKey, case .synced(let lines) = state else { return nil }
+        let textLines = lines.filter { !$0.text.isEmpty }
+        // 原文に翻訳が付いている歌詞（Apple Music の翻訳など）はそのまま使う
+        guard !textLines.isEmpty, textLines.allSatisfy({ $0.translation == nil }) else { return nil }
+        let allText = textLines.map(\.text).joined(separator: "\n")
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(allText)
+        guard recognizer.dominantLanguage == .english, Self.japaneseRatio(allText) < 0.05 else { return nil }
+        return (key, textLines)
+    }
+
+    /// 文字のうち、ひらがな・カタカナ・漢字の割合。
+    /// 日本語と英語が混ざった歌詞（日本の曲によくある）は、英語と判定されても翻訳しない
+    static func japaneseRatio(_ text: String) -> Double {
+        var letters = 0, japanese = 0
+        for scalar in text.unicodeScalars where scalar.properties.isAlphabetic {
+            letters += 1
+            switch scalar.value {
+            case 0x3040...0x30FF, 0x31F0...0x31FF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xFF66...0xFF9F:
+                japanese += 1
+            default:
+                break
+            }
+        }
+        return letters == 0 ? 0 : Double(japanese) / Double(letters)
+    }
+
+    /// 端末の翻訳結果（行の id → 日本語）を歌詞に付ける。曲が変わっていたら捨てる
+    func applyTranslations(_ translations: [Int: String], key: String) {
+        guard key == currentKey, !translations.isEmpty, case .synced(var lines) = state else { return }
+        for index in lines.indices {
+            if let text = translations[lines[index].id], lines[index].translation == nil {
+                lines[index].translation = text
+            }
+        }
+        state = .synced(lines)
+        machineTranslated = true
+        machineTranslatedKeys.insert(key)
+        if let cached = cache[key] { cache[key] = (.synced(lines), cached.1) }
+    }
+
     func retry() {
         guard let request = lastRequest else { return }
         cache["\(request.title)|\(request.artist)".lowercased()] = nil
@@ -372,11 +465,13 @@ final class LyricsStore {
         currentKey = nil
         state = .idle
         source = nil
+        machineTranslated = false
     }
 
     /// 取得元の設定を変えたときに呼ぶ
     func resetCache() {
         cache.removeAll()
+        machineTranslatedKeys.removeAll()
         retry()
     }
 }

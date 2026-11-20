@@ -62,6 +62,8 @@ final class TTMLParser: NSObject, XMLParserDelegate {
         var begin: Double
         var end: Double?
         var agent: String?
+        /// itunes:key（"L12" など）。<translations> の翻訳と結び付けるのに使う
+        var key: String?
         var words: [LyricWord] = []
         var background: [LyricWord] = []
         var looseText = ""
@@ -83,6 +85,14 @@ final class TTMLParser: NSObject, XMLParserDelegate {
     private var lines: [PendingLine] = []
     private var spans: [SpanFrame] = []
 
+    /// <head> の <translations> に入っている翻訳（言語 → 行のキー → 翻訳文）
+    private var translations: [String: [String: String]] = [:]
+    private var translationLanguages: [String] = []
+    private var inTranslations = false
+    private var translationLanguage: String?
+    private var translationKey: String?
+    private var translationText = ""
+
     // MARK: XMLParserDelegate
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
@@ -100,11 +110,22 @@ final class TTMLParser: NSObject, XMLParserDelegate {
                 agentTypes[id] = type
                 if type == "person" || type == "character" { personAgents.append(id) }
             }
+        case "translations" where !inBody:
+            inTranslations = true
+        case "translation" where inTranslations:
+            translationLanguage = attributes["lang"] ?? "und"
+            if let language = translationLanguage, !translationLanguages.contains(language) {
+                translationLanguages.append(language)
+            }
+        case "text" where inTranslations && translationLanguage != nil:
+            translationKey = attributes["for"]
+            translationText = ""
         case "body":
             inBody = true
         case "p" where inBody:
             if let begin = Self.time(attributes["begin"]) {
-                line = PendingLine(begin: begin, end: Self.time(attributes["end"]), agent: attributes["agent"])
+                line = PendingLine(begin: begin, end: Self.time(attributes["end"]), agent: attributes["agent"],
+                                   key: attributes["key"])
             }
         case "span" where line != nil:
             let parentBackground = spans.last?.background ?? false
@@ -130,6 +151,10 @@ final class TTMLParser: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if translationKey != nil {
+            translationText += string
+            return
+        }
         guard line != nil else { return }
         guard let top = spans.last else {
             appendLoose(string, background: false)
@@ -158,9 +183,26 @@ final class TTMLParser: NSObject, XMLParserDelegate {
             spans.removeAll()
         case "body":
             inBody = false
+        case "text" where translationKey != nil:
+            if let language = translationLanguage, let key = translationKey {
+                let text = translationText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty { translations[language, default: [:]][key] = text }
+            }
+            translationKey = nil
+        case "translation":
+            translationLanguage = nil
+        case "translations":
+            inTranslations = false
         default:
             break
         }
+    }
+
+    /// 端末の言語の翻訳を優先し、なければ最初の言語の翻訳を使う
+    private var preferredTranslations: [String: String] {
+        let device = Locale.current.language.languageCode?.identifier ?? "ja"
+        let language = translationLanguages.first { $0.lowercased().hasPrefix(device) } ?? translationLanguages.first
+        return language.flatMap { translations[$0] } ?? [:]
     }
 
     // MARK: Helpers
@@ -193,6 +235,7 @@ final class TTMLParser: NSObject, XMLParserDelegate {
             if let agent = pending.agent, agentTypes[agent] == nil, !order.contains(agent) { order.append(agent) }
         }
         let isDuet = order.count >= 2
+        let translated = preferredTranslations
 
         let result = lines.compactMap { pending -> LyricLine? in
             var words = pending.words
@@ -211,7 +254,8 @@ final class TTMLParser: NSObject, XMLParserDelegate {
             }
             return LyricLine(id: 0, time: pending.begin, text: text, endTime: pending.end,
                              words: words, background: pending.background,
-                             backgroundText: backgroundText, side: side)
+                             backgroundText: backgroundText, side: side,
+                             translation: pending.key.flatMap { translated[$0] })
         }
         return LyricLine.finalize(result)
     }

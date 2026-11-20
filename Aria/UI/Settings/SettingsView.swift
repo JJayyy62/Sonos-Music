@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage(RotationVolumeController.sensitivityKey) private var degreesPerStep = 3.5
     @Environment(SpotifyService.self) private var spotify
     @AppStorage(LyricsService.betterLyricsKey) private var useBetterLyrics = true
+    @AppStorage(LyricsService.translateEnglishKey) private var translateEnglish = true
     @State private var manualHost = ""
     @State private var showLink = false
 
@@ -79,6 +80,8 @@ struct SettingsView: View {
                 Section {
                     Toggle("Better Lyricsを使う（単語単位）", isOn: $useBetterLyrics)
                         .onChange(of: useBetterLyrics) { _, _ in store.lyrics.resetCache() }
+                    Toggle("英語の歌詞を日本語に翻訳", isOn: $translateEnglish)
+                        .onChange(of: translateEnglish) { _, _ in store.lyrics.resetCache() }
                     HStack {
                         Text("時間補正")
                         Spacer()
@@ -92,7 +95,7 @@ struct SettingsView: View {
                 } header: {
                     Text("歌詞")
                 } footer: {
-                    Text("まずBetter Lyrics（betterlyrics.org）で単語単位の同期歌詞を探し、見つからないときはLRCLIB（lrclib.net）の行単位の歌詞を使います。Better Lyricsはキャッシュ済みの曲だけがAPIキーなしで取得できるため、曲によってはLRCLIBになります。歌詞が音より遅れる場合は時間補正をプラスにしてください。")
+                    Text("まずBetter Lyrics（betterlyrics.org）で単語単位の同期歌詞を探し、見つからないときはLRCLIB（lrclib.net）の行単位の歌詞を使います。Better Lyricsはキャッシュ済みの曲だけがAPIキーなしで取得できるため、曲によってはLRCLIBになります。英語の歌詞の翻訳は、iPhoneに内蔵されたAppleの翻訳機能で端末の中で行います（初回は翻訳用の言語データのダウンロードを求められます）。歌詞が音より遅れる場合は時間補正をプラスにしてください。")
                 }
 
                 Section {
