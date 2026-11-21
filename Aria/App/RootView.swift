@@ -139,7 +139,7 @@ struct MiniPlayer: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            ArtworkView(url: store.track?.artworkURL, cornerRadius: 8, seed: store.track?.title)
+            ArtworkView(url: store.displayArtworkURL, cornerRadius: 8, seed: store.track?.title)
                 .frame(width: 40, height: 40)
                 .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
             VStack(alignment: .leading, spacing: 1) {

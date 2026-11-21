@@ -1,11 +1,8 @@
 import SwiftUI
-import Translation
 
 /// リアルタイム歌詞
 struct LyricsPanel: View {
     @Environment(SonosStore.self) private var store
-    /// 英語の歌詞を日本語に翻訳するときだけ設定する（端末内の Apple の翻訳）
-    @State private var translation: TranslationSession.Configuration?
 
     var body: some View {
         Group {
@@ -32,39 +29,6 @@ struct LyricsPanel: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: store.lyrics.state) { requestTranslationIfNeeded() }
-        .translationTask(translation) { session in
-            await translate(with: session)
-        }
-    }
-
-    private func requestTranslationIfNeeded() {
-        guard store.lyrics.englishLinesToTranslate() != nil else { return }
-        if translation == nil {
-            translation = TranslationSession.Configuration(source: Locale.Language(identifier: "en"),
-                                                           target: Locale.Language(identifier: "ja"))
-        } else {
-            // 2曲目以降は、同じ設定のまま翻訳をやり直す
-            translation?.invalidate()
-        }
-    }
-
-    /// 歌詞を1行ずつ翻訳して、原文の下に付ける。
-    /// 翻訳用の言語データが未ダウンロードなら、iOS がダウンロードの確認を出す
-    private func translate(with session: TranslationSession) async {
-        guard let (key, lines) = store.lyrics.englishLinesToTranslate() else { return }
-        let requests = lines.map { TranslationSession.Request(sourceText: $0.text, clientIdentifier: String($0.id)) }
-        do {
-            var results: [Int: String] = [:]
-            for response in try await session.translations(from: requests) {
-                if let id = response.clientIdentifier.flatMap(Int.init) {
-                    results[id] = response.targetText
-                }
-            }
-            store.lyrics.applyTranslations(results, key: key)
-        } catch {
-            // 翻訳できなかったときは原文だけを表示する
-        }
     }
 
     private func message(_ text: String, symbol: String) -> some View {
@@ -87,8 +51,7 @@ struct SyncedLyricsView: View {
         TimelineView(.animation(minimumInterval: wordSynced ? 1.0 / 30 : 0.1, paused: !store.isPlaying)) { context in
             let time = store.position(at: context.date) + store.lyrics.timingOffset
             LyricsScroller(lines: lines, activeIndex: LyricLine.activeIndex(in: lines, at: time), time: time,
-                           source: store.lyrics.source,
-                           machineTranslated: store.lyrics.machineTranslated) { line in
+                           source: store.lyrics.source) { line in
                 store.seek(to: max(0, line.time - store.lyrics.timingOffset))
             }
         }
@@ -100,8 +63,6 @@ struct LyricsScroller: View {
     let activeIndex: Int?
     let time: Double
     let source: LyricsSource?
-    /// 端末で機械翻訳した歌詞か（最後に「翻訳: Apple」と出す）
-    var machineTranslated = false
     let onTap: (LyricLine) -> Void
 
     @State private var userScrolling = false
@@ -129,11 +90,6 @@ struct LyricsScroller: View {
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.4))
                             .padding(.top, 12)
-                    }
-                    if machineTranslated {
-                        Text("翻訳: Apple（端末内の機械翻訳）")
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.4))
                     }
                     Color.clear.frame(height: 320)
                 }

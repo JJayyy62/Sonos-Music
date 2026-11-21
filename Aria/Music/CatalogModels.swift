@@ -25,6 +25,8 @@ struct CatalogTrack: Identifiable, Hashable, Sendable {
     var artworkURL: URL?
     var duration: Double?
     var number: Int?
+    /// Explicit（E マーク）の曲
+    var explicit = false
 
     var id: String { "\(service.rawValue)-\(serviceID)" }
     var content: ServiceContent { .song(service, id: serviceID, title: title, albumID: albumID) }

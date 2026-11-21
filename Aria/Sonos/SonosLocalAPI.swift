@@ -26,6 +26,16 @@ actor SonosLocalAPI {
         var album: String?
         var durationMillis: Int?
         var quality: TrackQuality?
+        /// 再生元の種類（"playlist"、Spotify Connect なら "spotify.connect" や "album.spotify.connect" など）
+        var containerType: String?
+        var containerName: String?
+        /// 次に流れる曲（Spotify Connect では Spotify が決める）
+        var nextName: String?
+        var nextArtist: String?
+        var nextImageURL: URL?
+
+        /// Spotify が次の曲を決める再生か（Sonos のキューは使われない）
+        var isSpotifyConnect: Bool { containerType?.contains("spotify") == true }
     }
 
     private let session: URLSession
@@ -53,6 +63,15 @@ actor SonosLocalAPI {
         result.artist = (track["artist"] as? [String: Any])?["name"] as? String
         result.album = (track["album"] as? [String: Any])?["name"] as? String
         result.durationMillis = track["durationMillis"] as? Int
+        if let container = json["container"] as? [String: Any] {
+            result.containerType = container["type"] as? String
+            result.containerName = container["name"] as? String
+        }
+        if let next = (json["nextItem"] as? [String: Any])?["track"] as? [String: Any] {
+            result.nextName = next["name"] as? String
+            result.nextArtist = (next["artist"] as? [String: Any])?["name"] as? String
+            result.nextImageURL = (next["imageUrl"] as? String).flatMap(URL.init(string:))
+        }
         if let quality = track["quality"] as? [String: Any] {
             let parsed = TrackQuality(
                 bitDepth: quality["bitDepth"] as? Int,
@@ -71,6 +90,52 @@ actor SonosLocalAPI {
               let groupID = info["groupId"] as? String else { return nil }
         groupIDs[host] = groupID
         return groupID
+    }
+
+    enum LoadError: LocalizedError {
+        case noGroup
+        case rejected(Int, String?)
+
+        var errorDescription: String? {
+            switch self {
+            case .noGroup: return "スピーカーのグループを確認できませんでした"
+            case .rejected(_, let reason):
+                return "Sonosが再生を受け付けませんでした" + (reason.map { "（\($0)）" } ?? "")
+            }
+        }
+    }
+
+    /// 曲・アルバム・プレイリストを再生する（純正 Sonos アプリと同じ API。キューは置き換わる）。
+    /// UPnP では Sonos が Spotify の追加を拒否するため、Spotify はこちらで再生する
+    func loadContent(host: String, type: String, serviceID: Int, objectID: String, accountSerial: Int) async throws {
+        guard let groupID = await groupID(host: host) else { throw LoadError.noGroup }
+        let body: [String: Any] = [
+            "type": type,
+            "id": ["serviceId": String(serviceID), "objectId": objectID, "accountId": "sn_\(accountSerial)"],
+            "playbackAction": "PLAY",
+        ]
+        let (status, data) = await post(host: host, path: "groups/\(groupID)/playback/content", body: body)
+        if status == 200 { return }
+        // グループが組み替わっていたら取り直して、もう一度だけ試す
+        groupIDs[host] = nil
+        if let retried = await self.groupID(host: host), retried != groupID {
+            let (again, _) = await post(host: host, path: "groups/\(retried)/playback/content", body: body)
+            if again == 200 { return }
+        }
+        let reason = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any])?["errorCode"] as? String
+        throw LoadError.rejected(status, reason)
+    }
+
+    private func post(host: String, path: String, body: [String: Any]) async -> (Int, Data?) {
+        let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+        guard let url = URL(string: "https://\(host):1443/api/v1/\(encoded)") else { return (0, nil) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(Self.apiKey, forHTTPHeaderField: "X-Sonos-Api-Key")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let (data, response) = try? await session.data(for: request) else { return (0, nil) }
+        return ((response as? HTTPURLResponse)?.statusCode ?? 0, data)
     }
 
     private func get(host: String, path: String) async -> [String: Any]? {

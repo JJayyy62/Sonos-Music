@@ -175,6 +175,8 @@ struct TrackRow: View {
     var artworkURL: URL?
     var leadingNumber: Int?
     var trailing: String?
+    /// Explicit（E マーク）を曲名の横に出す
+    var explicit = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -188,7 +190,15 @@ struct TrackRow: View {
                     .frame(width: 48, height: 48)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(title).lineLimit(1)
+                    if explicit {
+                        Image(systemName: "e.square.fill")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                            .accessibilityLabel("Explicit")
+                    }
+                }
                 if let subtitle, !subtitle.isEmpty {
                     Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 }

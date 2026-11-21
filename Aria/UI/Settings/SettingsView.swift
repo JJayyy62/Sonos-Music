@@ -9,10 +9,10 @@ struct SettingsView: View {
     @AppStorage(RotationVolumeController.enabledKey) private var rotationEnabled = true
     @AppStorage(RotationVolumeController.sensitivityKey) private var degreesPerStep = 3.5
     @Environment(SpotifyService.self) private var spotify
-    @AppStorage(LyricsService.betterLyricsKey) private var useBetterLyrics = true
-    @AppStorage(LyricsService.translateEnglishKey) private var translateEnglish = true
     @State private var manualHost = ""
     @State private var showLink = false
+    @State private var lyricsCacheUsage: (count: Int, bytes: Int)?
+    @State private var confirmClearCache = false
 
     var body: some View {
         NavigationStack {
@@ -78,10 +78,6 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Toggle("Better Lyricsを使う（単語単位）", isOn: $useBetterLyrics)
-                        .onChange(of: useBetterLyrics) { _, _ in store.lyrics.resetCache() }
-                    Toggle("英語の歌詞を日本語に翻訳", isOn: $translateEnglish)
-                        .onChange(of: translateEnglish) { _, _ in store.lyrics.resetCache() }
                     HStack {
                         Text("時間補正")
                         Spacer()
@@ -95,7 +91,7 @@ struct SettingsView: View {
                 } header: {
                     Text("歌詞")
                 } footer: {
-                    Text("まずBetter Lyrics（betterlyrics.org）で単語単位の同期歌詞を探し、見つからないときはLRCLIB（lrclib.net）の行単位の歌詞を使います。Better Lyricsはキャッシュ済みの曲だけがAPIキーなしで取得できるため、曲によってはLRCLIBになります。英語の歌詞の翻訳は、iPhoneに内蔵されたAppleの翻訳機能で端末の中で行います（初回は翻訳用の言語データのダウンロードを求められます）。歌詞が音より遅れる場合は時間補正をプラスにしてください。")
+                    Text("歌詞は、単語ごとに光る歌詞を優先して、Better Lyrics → Karalyr → LRCLIB の順に自動で探します。どこから取れたかは歌詞の画面の一番下に表示されます。歌詞が音より遅れる場合は時間補正をプラスにしてください。")
                 }
 
                 Section {
@@ -118,6 +114,18 @@ struct SettingsView: View {
                     Text("再生はSonosに登録済みの各サービスのアカウントで行われます。サービスの追加は純正のSonosアプリで行ってください。")
                 }
 
+                Section {
+                    LabeledContent("保存した歌詞", value: lyricsCacheUsage.map {
+                        "\($0.count)曲・\(ByteCountFormatter.string(fromByteCount: Int64($0.bytes), countStyle: .file))"
+                    } ?? "確認中…")
+                    Button("キャッシュを削除", role: .destructive) { confirmClearCache = true }
+                } header: {
+                    Text("キャッシュ")
+                } footer: {
+                    Text("一度表示した歌詞は端末に保存し、次からは通信せずに表示します（見つかった歌詞は30日、見つからなかった結果は1日で取り直します）。削除すると、保存した歌詞と、アートワーク・曲名の日本語表記の一時データを消して、次に表示するときに取り直します。")
+                }
+                .task { lyricsCacheUsage = await LyricsDiskCache.shared.usage() }
+
                 Section("このアプリについて") {
                     LabeledContent("バージョン", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "-")
                     Text("AriaはSonos社とは無関係の非公式アプリです。同じネットワーク上のSonosスピーカーをローカルで操作します。")
@@ -126,6 +134,20 @@ struct SettingsView: View {
                 }
             }
             .inkBackground()
+            .alert("キャッシュを削除しますか？", isPresented: $confirmClearCache) {
+                Button("キャンセル", role: .cancel) {}
+                Button("削除", role: .destructive) {
+                    Task {
+                        await ImageLoader.shared.removeAll()
+                        await TrackNameLocalizer.shared.removeAll()
+                        await store.lyrics.clearAllCaches()
+                        lyricsCacheUsage = await LyricsDiskCache.shared.usage()
+                        store.show(message: "キャッシュを削除しました")
+                    }
+                }
+            } message: {
+                Text("保存した歌詞はすべて消え、次に表示するときにインターネットから取り直します。")
+            }
             .navigationTitle("設定")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -246,7 +268,7 @@ struct ServiceSettingsView: View {
             } header: {
                 Text("検索・ライブラリ（Spotify Web API）")
             } footer: {
-                Text("developer.spotify.com のダッシュボードでアプリを作成し、Redirect URI に上の値を登録して、表示された Client ID を入力してください。共有リンクからの再生は設定なしで使えます。")
+                Text("developer.spotify.com のダッシュボードでアプリを作成し、Redirect URI に上の値を登録して、表示された Client ID を入力してください。共有リンクからの再生は Client ID なしで使えますが、最初に1回だけ、純正のSonosアプリでSpotifyの曲を1つお気に入りに追加しておく必要があります（Sonos上のSpotifyアカウントを見分けるために使います）。")
             }
         case .amazonMusic:
             Section {

@@ -85,7 +85,7 @@ struct NowPlayingView: View {
     private var largeArtwork: some View {
         GeometryReader { geometry in
             let side = min(geometry.size.width, geometry.size.height)
-            ArtworkView(url: store.track?.artworkURL, cornerRadius: 12, placeholderSymbol: placeholderSymbol,
+            ArtworkView(url: store.displayArtworkURL, cornerRadius: 12, placeholderSymbol: placeholderSymbol,
                         seed: store.track?.title)
                 .matchedGeometryEffect(id: "artwork", in: artworkSpace)
                 .frame(width: side, height: side)
@@ -94,14 +94,13 @@ struct NowPlayingView: View {
                         y: store.isPlaying ? 16 : 6)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .animation(.spring(response: 0.5, dampingFraction: 0.68), value: store.isPlaying)
-                .onTapGesture { if store.lyrics.hasSyncedLyrics { setPanel(.lyrics) } }
         }
         .padding(.vertical, 18)
     }
 
     private var compactHeader: some View {
         HStack(spacing: 12) {
-            ArtworkView(url: store.track?.artworkURL, cornerRadius: 6, placeholderSymbol: placeholderSymbol,
+            ArtworkView(url: store.displayArtworkURL, cornerRadius: 6, placeholderSymbol: placeholderSymbol,
                         seed: store.track?.title)
                 .matchedGeometryEffect(id: "artwork", in: artworkSpace)
                 .frame(width: 60, height: 60)
@@ -167,15 +166,14 @@ struct PlayerControls: View {
                 Text(store.displayTitle ?? "再生停止中")
                     .font(.title3.weight(.bold))
                     .lineLimit(1)
-                HStack(spacing: 8) {
-                    Text(subtitle)
-                        .font(.title3)
-                        .foregroundStyle(.white.opacity(0.6))
-                        .lineLimit(1)
-                    if let service = store.currentService {
-                        ServiceTag(service: service, size: 9)
-                            .layoutPriority(1)
-                    }
+                Text(subtitle)
+                    .font(.title3)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .lineLimit(1)
+                // 音楽の取得元（Apple Music など）は歌手名の下の段に出す
+                if let service = store.currentService {
+                    ServiceTag(service: service, size: 10)
+                        .padding(.top, 4)
                 }
             }
             Spacer(minLength: 8)

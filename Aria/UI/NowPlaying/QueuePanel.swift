@@ -11,6 +11,18 @@ struct QueuePanel: View {
                          isOn: store.playMode.repeatMode != .off) { store.cycleRepeat() }
             }
 
+            if let spotify = store.spotifyConnect {
+                SpotifyUpNext(info: spotify)
+            } else {
+                sonosQueue
+            }
+        }
+        .padding(.bottom, 8)
+        .task { await store.refreshQueue() }
+    }
+
+    @ViewBuilder
+    private var sonosQueue: some View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("次に再生").font(.headline)
@@ -71,9 +83,6 @@ struct QueuePanel: View {
                     }
                 }
             }
-        }
-        .padding(.bottom, 8)
-        .task { await store.refreshQueue() }
     }
 
     /// List を右へ広げる幅。
@@ -85,6 +94,42 @@ struct QueuePanel: View {
         let index = store.currentTrackNumber - 1
         guard store.isPlayingQueue, store.queue.indices.contains(index) else { return }
         proxy.scrollTo(store.queue[index].id, anchor: .top)
+    }
+}
+
+/// Spotify Connect で再生中は、次の曲は Spotify が決める（Sonos のキューは使われない）
+private struct SpotifyUpNext: View {
+    let info: SonosStore.SpotifyConnectInfo
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("次に再生").font(.headline)
+                Text(info.singleTrack
+                     ? "Spotifyで1曲だけ再生しているため、次からはSpotifyのおすすめ（自動再生）が流れます。続けて聴きたい場合は、アルバムやプレイリストのリンクから再生してください。"
+                     : "Spotifyの「\(info.contextName ?? "アルバム")」を再生中です。次の曲はSpotifyが決めます。")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.5))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let name = info.nextName {
+                HStack(spacing: 12) {
+                    ArtworkView(url: info.nextImageURL, cornerRadius: 8, seed: name)
+                        .frame(width: 46, height: 46)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(name).lineLimit(1)
+                        Text(info.nextArtist ?? "")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.55))
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                }
+                .foregroundStyle(.white)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 

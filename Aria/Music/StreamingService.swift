@@ -163,23 +163,31 @@ enum SonosServiceURI {
 
     // MARK: Spotify（sid 12）
 
+    /// 実際の Sonos のお気に入り（Spotify のアルバム）では次の形だった。これに合わせ、合わない場合に備えて従来の形も試す
+    /// `x-rincon-cpcontainer:1006206cspotify%3Aalbum%3A<ID>?sid=12&flags=8300&sn=<番号>`
+    /// （メタデータの id も同じ、parentID は id と同じ、class は playlistContainer、desc は `SA_RINCON3079_X_#Svc3079-<トークン>-Token`）
     private static func spotify(_ content: ServiceContent, _ account: ServiceAccount) -> [Candidate] {
         let sid = StreamingService.spotify.sonosServiceID
-        let encoded = "spotify%3a\(content.kind.rawValue)%3a\(content.id)"
+        let encoded = "spotify%3A\(content.kind.rawValue)%3A\(content.id)"
+        let query = "sid=\(sid)&flags=8300&sn=\(account.serial)"
         switch content.kind {
         case .track:
-            return [("x-sonos-spotify:\(encoded)?sid=\(sid)&flags=8224&sn=\(account.serial)",
-                     meta("00032020\(encoded)", parent: "", content, trackClass, account))]
+            return [8232, 8224].map { flags in
+                ("x-sonos-spotify:\(encoded)?sid=\(sid)&flags=\(flags)&sn=\(account.serial)",
+                 meta("00032020\(encoded)", parent: "", content, trackClass, account))
+            }
         case .album:
-            return ["1004206c", "0004206c"].map { prefix in
-                ("x-rincon-cpcontainer:\(prefix)\(encoded)?sid=\(sid)&flags=8300&sn=\(account.serial)",
-                 meta("\(prefix)\(encoded)", parent: "", content, albumClass, account))
-            }
+            let real = "1006206c\(encoded)"
+            return [("x-rincon-cpcontainer:\(real)?\(query)", meta(real, parent: real, content, playlistClass, account))]
+                + ["1004206c", "0004206c"].map { prefix in
+                    ("x-rincon-cpcontainer:\(prefix)\(encoded)?\(query)",
+                     meta("\(prefix)\(encoded)", parent: "", content, albumClass, account))
+                }
         case .playlist:
-            return ["1006206c", "0006206c"].map { prefix in
-                ("x-rincon-cpcontainer:\(prefix)\(encoded)?sid=\(sid)&flags=8300&sn=\(account.serial)",
-                 meta("\(prefix)\(encoded)", parent: "", content, playlistClass, account))
-            }
+            let real = "1006206c\(encoded)"
+            return [("x-rincon-cpcontainer:\(real)?\(query)", meta(real, parent: real, content, playlistClass, account)),
+                    ("x-rincon-cpcontainer:0006206c\(encoded)?\(query)",
+                     meta("0006206c\(encoded)", parent: "", content, playlistClass, account))]
         }
     }
 

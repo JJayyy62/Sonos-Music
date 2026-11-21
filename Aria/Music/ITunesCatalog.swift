@@ -18,11 +18,96 @@ enum ITunesCatalog {
         async let songs = request("search", ["term": term, "entity": "song", "limit": "25"])
         async let albums = request("search", ["term": term, "entity": "album", "limit": "20"])
         async let artists = request("search", ["term": term, "entity": "musicArtist", "limit": "10"])
-        return CatalogSearchResults(
-            tracks: try await songs.compactMap(\.track),
-            albums: try await albums.compactMap(\.album),
+        let songItems = try await songs
+        let albumItems = try await albums
+        let artistItems = try await artists
+
+        var result = CatalogSearchResults(
+            tracks: songItems.compactMap(\.track),
+            albums: albumItems.compactMap(\.album),
             playlists: [],
-            artists: try await artists.compactMap(\.artist))
+            artists: artistItems.compactMap(\.artist))
+
+        // この検索は Explicit（E マーク）の曲・アルバムを返さない。アーティストのアルバム一覧と曲目には含まれるので、
+        // 検索に出てきた上位のアーティストについて、検索語に合う Explicit の曲・アルバムを足す
+        let explicit = await explicitMatches(term: term,
+                                             artistIDs: topArtistIDs(term: term, songs: songItems,
+                                                                     others: artistItems + albumItems))
+        let knownTracks = Set(result.tracks.map(\.serviceID))
+        let knownAlbums = Set(result.albums.map(\.serviceID))
+        result.tracks = explicit.tracks.filter { !knownTracks.contains($0.serviceID) } + result.tracks
+        result.albums = explicit.albums.filter { !knownAlbums.contains($0.serviceID) } + result.albums
+        return result
+    }
+
+    /// Explicit の曲を探すアーティスト（最大 3 人）。
+    /// 曲名が検索語に合う曲のアーティストを優先し（例: "STAY" の The Kid LAROI）、残りは検索結果に多く出てくる順
+    private static func topArtistIDs(term: String, songs: [Item], others: [Item]) -> [Int] {
+        let words = normalizedWords(term)
+        var ordered: [Int] = []
+        func add(_ id: Int?) { if let id, !ordered.contains(id) { ordered.append(id) } }
+        for song in songs where words.contains(where: { normalize(song.trackName ?? "").contains($0) }) {
+            add(song.artistId)
+        }
+        var counts: [Int: Int] = [:]
+        for id in (songs + others).compactMap(\.artistId) { counts[id, default: 0] += 1 }
+        for id in counts.keys.sorted(by: { counts[$0, default: 0] > counts[$1, default: 0] }) { add(id) }
+        return Array(ordered.prefix(3))
+    }
+
+    /// アーティストのアルバム（Explicit を含む）と、その曲目から、検索語に合う Explicit のものを探す
+    private static func explicitMatches(term: String, artistIDs: [Int]) async -> (tracks: [CatalogTrack], albums: [CatalogCollection]) {
+        guard !artistIDs.isEmpty else { return ([], []) }
+        let words = normalizedWords(term)
+        guard !words.isEmpty else { return ([], []) }
+        // 日本のストアはアーティスト名がカタカナになる（ジャスティン・ビーバー）ので、英語表記も照合に使う。
+        // アーティスト ID はどのストアでも同じなので、米国のストアで英語名を引く
+        var englishName: [Int: String] = [:]
+        for artist in (try? await request("lookup", ["id": artistIDs.map(String.init).joined(separator: ","),
+                                                     "country": "us"])) ?? [] {
+            if let id = artist.artistId, let name = artist.artistName { englishName[id] = name }
+        }
+        let allEnglishNames = englishName.values.joined(separator: " ")
+        func matches(_ item: Item, name: String?) -> Bool {
+            let nameOnly = normalize(name ?? "")
+            let ownArtist = normalize((item.artistName ?? "") + " " + (item.artistId.flatMap { englishName[$0] } ?? ""))
+            // 曲名（アルバム名）に検索語が入っている：残りの語は、このアーティストか、選んだアーティストの英語名にあればよい
+            //   例: "STAY Justin Bieber" → 曲名 STAY、Justin Bieber は英語名で照合
+            if words.contains(where: { nameOnly.contains($0) }) {
+                let haystack = nameOnly + " " + ownArtist + " " + normalize(allEnglishNames)
+                return words.allSatisfy { haystack.contains($0) }
+            }
+            // アーティスト名だけで検索したとき（例: "Peterparker69"）は、そのアーティスト自身の曲だけを出す
+            return words.allSatisfy { ownArtist.contains($0) }
+        }
+
+        guard let albums = try? await request("lookup", ["id": artistIDs.map(String.init).joined(separator: ","),
+                                                          "entity": "album", "limit": "200"]) else { return ([], []) }
+        let albumItems = albums.filter { $0.wrapperType == "collection" }
+        let explicitAlbums = albumItems.filter { $0.collectionExplicitness == "explicit" }
+        let matchedAlbums = explicitAlbums.filter { matches($0, name: $0.collectionName) }.compactMap(\.album)
+
+        // 曲目は Explicit のアルバムだけ見ればよい（それ以外の曲は通常の検索に出る）
+        let ids = explicitAlbums.compactMap(\.collectionId).prefix(40).map(String.init).joined(separator: ",")
+        guard !ids.isEmpty else { return ([], matchedAlbums) }
+        guard let tracks = try? await request("lookup", ["id": ids, "entity": "song", "limit": "200"])
+        else { return ([], matchedAlbums) }
+        var seen = Set<String>()
+        let matchedTracks = tracks
+            .filter { $0.trackExplicitness == "explicit" && matches($0, name: $0.trackName) }
+            .compactMap(\.track)
+            .filter { seen.insert($0.title.lowercased()).inserted }
+        return (Array(matchedTracks.prefix(10)), Array(matchedAlbums.prefix(10)))
+    }
+
+    private static func normalize(_ text: String) -> String {
+        text.lowercased().folding(options: [.diacriticInsensitive, .widthInsensitive], locale: nil)
+            .unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) || $0 == " " }
+            .map(String.init).joined()
+    }
+
+    private static func normalizedWords(_ text: String) -> [String] {
+        normalize(text).split(separator: " ").map(String.init).filter { !$0.isEmpty }
     }
 
     static func albumTracks(_ albumID: String) async throws -> [CatalogTrack] {
@@ -48,6 +133,8 @@ enum ITunesCatalog {
         let wrapperType: String?
         let kind: String?
         let trackId: Int?
+        let trackExplicitness: String?
+        let collectionExplicitness: String?
         let trackName: String?
         let collectionId: Int?
         let collectionName: String?
@@ -69,7 +156,8 @@ enum ITunesCatalog {
             return CatalogTrack(service: .appleMusic, serviceID: String(trackId), title: trackName,
                                 artist: artistName ?? "", album: collectionName,
                                 albumID: collectionId.map(String.init), artworkURL: artwork,
-                                duration: trackTimeMillis.map { Double($0) / 1000 }, number: trackNumber)
+                                duration: trackTimeMillis.map { Double($0) / 1000 }, number: trackNumber,
+                                explicit: trackExplicitness == "explicit")
         }
 
         var album: CatalogCollection? {

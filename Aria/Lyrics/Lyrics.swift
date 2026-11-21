@@ -1,9 +1,8 @@
 import Foundation
-import NaturalLanguage
 import Observation
 
 /// 単語（音節）単位の歌詞
-struct LyricWord: Equatable, Sendable {
+struct LyricWord: Equatable, Sendable, Codable {
     let start: Double
     let end: Double
     var text: String
@@ -14,8 +13,8 @@ struct LyricWord: Equatable, Sendable {
     }
 }
 
-struct LyricLine: Identifiable, Equatable, Sendable {
-    enum Side: Sendable { case leading, trailing }
+struct LyricLine: Identifiable, Equatable, Sendable, Codable {
+    enum Side: String, Sendable, Codable { case leading, trailing }
 
     let id: Int
     let time: Double
@@ -117,11 +116,11 @@ struct LyricLine: Identifiable, Equatable, Sendable {
 
 enum LRCParser {
     private static let timestamp = try! NSRegularExpression(pattern: #"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]"#)
-    private static let wordTimestamp = try! NSRegularExpression(pattern: #"<\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?>"#)
+    private static let wordTimestamp = try! NSRegularExpression(pattern: #"<(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?>"#)
 
     static func parse(_ text: String) -> [LyricLine] {
         var offset = 0.0
-        var entries: [(time: Double, text: String)] = []
+        var entries: [(time: Double, text: String, words: [LyricWord])] = []
 
         for raw in text.components(separatedBy: .newlines) {
             let line = raw.trimmingCharacters(in: .whitespaces)
@@ -150,57 +149,148 @@ enum LRCParser {
             }
             guard !times.isEmpty else { continue }
 
-            var content = ns.substring(from: cursor)
-            content = wordTimestamp.stringByReplacingMatches(
-                in: content, range: NSRange(location: 0, length: (content as NSString).length), withTemplate: "")
+            let raw = ns.substring(from: cursor)
+            let words = wordTimed(raw, offset: offset)
+            var content = wordTimestamp.stringByReplacingMatches(
+                in: raw, range: NSRange(location: 0, length: (raw as NSString).length), withTemplate: "")
+            // 単語ごとの時刻がある行は、日本語の文字間の空白を詰めた単語から行の文字列を作る
+            if !words.isEmpty { content = words.map(\.text).joined() }
             content = content.trimmingCharacters(in: .whitespaces)
-            for time in times { entries.append((max(0, time - offset), content)) }
+            // 単語ごとの時刻は1つ目の行時刻にだけ対応しているので、時刻が複数ある行では使わない
+            for time in times {
+                entries.append((max(0, time - offset), content, times.count == 1 ? words : []))
+            }
         }
 
-        return LyricLine.finalize(entries.map { LyricLine(id: 0, time: $0.time, text: $0.text) })
+        return LyricLine.finalize(entries.map { LyricLine(id: 0, time: $0.time, text: $0.text, words: $0.words) })
+    }
+
+    /// Enhanced LRC の単語ごとの時刻（"<00:12.00>First <00:12.60>line <00:13.10>"）を単語の一覧にする。
+    /// 各単語は次の時刻タグまで続く。最後のタグの後に文字がなければ、それは直前の単語の終わりを表す
+    private static func wordTimed(_ raw: String, offset: Double) -> [LyricWord] {
+        let ns = raw as NSString
+        let matches = wordTimestamp.matches(in: raw, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return [] }
+        func seconds(_ match: NSTextCheckingResult) -> Double {
+            let minutes = Double(ns.substring(with: match.range(at: 1))) ?? 0
+            let secs = Double(ns.substring(with: match.range(at: 2))) ?? 0
+            var fraction = 0.0
+            if match.range(at: 3).location != NSNotFound {
+                let digits = ns.substring(with: match.range(at: 3))
+                fraction = (Double(digits) ?? 0) / pow(10, Double(digits.count))
+            }
+            return max(0, minutes * 60 + secs + fraction - offset)
+        }
+        var words: [LyricWord] = []
+        for (index, match) in matches.enumerated() {
+            let textStart = match.range.location + match.range.length
+            let textEnd = index + 1 < matches.count ? matches[index + 1].range.location : ns.length
+            var text = ns.substring(with: NSRange(location: textStart, length: textEnd - textStart))
+            if words.isEmpty { text = String(text.drop { $0.isWhitespace }) }
+            guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+            let start = seconds(match)
+            let end = index + 1 < matches.count ? seconds(matches[index + 1]) : start + 1
+            words.append(LyricWord(start: start, end: max(end, start), text: text))
+        }
+        // Enhanced LRC は単語を空白で区切るので、日本語・中国語では1文字ごとに空白が入ってしまう。
+        // 前後がどちらも日本語・中国語の文字なら、その空白を取り除く
+        for index in words.indices.dropLast() where words[index].text.last?.isWhitespace == true {
+            let body = words[index].text.trimmingCharacters(in: .whitespaces)
+            if let left = body.last, let right = words[index + 1].text.first,
+               isCJK(left), isCJK(right) {
+                words[index].text = body
+            }
+        }
+        if let last = words.indices.last {
+            words[last].text = String(words[last].text.reversed().drop { $0.isWhitespace }.reversed())
+        }
+        return words
+    }
+
+    /// ひらがな・カタカナ・漢字・全角の句読点など
+    private static func isCJK(_ character: Character) -> Bool {
+        character.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3000...0x30FF, 0x31F0...0x31FF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF, 0xFF00...0xFFEF:
+                return true
+            default:
+                return false
+            }
+        }
     }
 }
 
 // MARK: - Sources
 
-enum LyricsSource: String, Sendable {
+enum LyricsSource: String, Sendable, Codable {
     case betterLyrics = "Better Lyrics"
     case lrclib = "LRCLIB"
+    case karalyr = "Karalyr"
 }
 
 enum LyricsService {
-    static let betterLyricsKey = "useBetterLyrics"
-    static let translateEnglishKey = "translateEnglishLyrics"
-
-    static var useBetterLyrics: Bool {
-        UserDefaults.standard.object(forKey: betterLyricsKey) as? Bool ?? true
-    }
-
-    /// 英語の歌詞を日本語に翻訳して表示するか（端末の言語が日本語のときだけ）
-    static var translateEnglish: Bool {
-        UserDefaults.standard.object(forKey: translateEnglishKey) as? Bool ?? true
-    }
-
-    /// Better Lyrics（単語単位）→ LRCLIB（行単位）の順に探す
-    static func lookup(title: String, artist: String, album: String, duration: Double) async -> (LyricsStore.State, LyricsSource?) {
-        if useBetterLyrics {
-            if case .found(let lines) = await BetterLyricsClient.fetch(title: title, artist: artist, album: album, duration: duration) {
-                return (.synced(lines), .betterLyrics)
-            }
-            if Task.isCancelled { return (.idle, nil) }
+    /// 以前は設定で取得元を選べたが、ややこしいので固定の順番にした。古い設定値が残っていても使わないよう消す
+    static func removeLegacySourceSettings() {
+        for key in ["useBetterLyrics", "debug.disableLRCLIB", "debug.disableKaralyr"] {
+            UserDefaults.standard.removeObject(forKey: key)
         }
+    }
+
+    /// 歌詞を探す順番（単語ごとの時刻がある歌詞を優先する）
+    /// 1. Better Lyrics の単語単位の歌詞
+    /// 2. Karalyr の単語単位の歌詞（Karalyr は単語単位の歌詞だけを持つ）
+    /// 3. Better Lyrics の行単位の歌詞
+    /// 4. LRCLIB（行単位、時刻なしの歌詞も）
+    /// Better Lyrics と Karalyr は同時に問い合わせて、待ち時間を増やさない
+    static func lookup(title: String, artist: String, album: String, duration: Double) async -> (LyricsStore.State, LyricsSource?) {
+        async let better: [LyricLine]? = betterLyrics(title, artist, album, duration)
+        async let karaoke: [LyricLine]? = karalyr(title, artist, album, duration)
+
+        let betterLines = await better
+        if let betterLines, betterLines.contains(where: \.isWordSynced) { return (.synced(betterLines), .betterLyrics) }
+        let karaokeLines = await karaoke
+        if Task.isCancelled { return (.idle, nil) }
+        if let karaokeLines { return (.synced(karaokeLines), .karalyr) }
+        if let betterLines { return (.synced(betterLines), .betterLyrics) }
+
         let state = await LRCLIBClient.lookup(title: title, artist: artist, album: album, duration: duration)
         switch state {
         case .synced, .plain, .instrumental: return (state, .lrclib)
         default: return (state, nil)
         }
     }
+
+    private static func betterLyrics(_ title: String, _ artist: String, _ album: String, _ duration: Double) async -> [LyricLine]? {
+        if case .found(let lines) = await BetterLyricsClient.fetch(title: title, artist: artist, album: album, duration: duration) {
+            return lines
+        }
+        return nil
+    }
+
+    /// Karalyr の歌詞のうち、単語ごとの時刻が付いているものだけを返す
+    private static func karalyr(_ title: String, _ artist: String, _ album: String, _ duration: Double) async -> [LyricLine]? {
+        let state = await LRCLIBClient.lookup(title: title, artist: artist, album: album, duration: duration, server: .karalyr)
+        guard case .synced(let lines) = state, lines.contains(where: \.isWordSynced) else { return nil }
+        return lines
+    }
 }
 
 // MARK: - LRCLIB
 
-/// https://lrclib.net の無料API（同期歌詞）
+/// https://lrclib.net の無料API（同期歌詞）。
+/// LRCLIB 互換の API を持つ Karalyr（https://www.karalyr.com）にも、接続先を替えて使う
 enum LRCLIBClient {
+    /// 接続先。どちらも同じ形の /get と /search を持つ
+    struct Server: Sendable {
+        let base: String
+        let headers: [String: String]
+
+        static let lrclib = Server(base: "https://lrclib.net/api", headers: [:])
+        /// 単語ごとの時刻付きの歌詞だけを持つカラオケ歌詞データベース。
+        /// どのアプリからの利用か分かるように X-Karalyr-Client を付ける（任意のヘッダー）
+        static let karalyr = Server(base: "https://www.karalyr.com/api", headers: ["X-Karalyr-Client": "Aria/1.0"])
+    }
+
     struct Record: Decodable {
         let id: Int
         let trackName: String?
@@ -212,23 +302,26 @@ enum LRCLIBClient {
         let syncedLyrics: String?
     }
 
-    private static let base = "https://lrclib.net/api"
-
-    static func lookup(title: String, artist: String, album: String, duration: Double) async -> LyricsStore.State {
+    static func lookup(title: String, artist: String, album: String, duration: Double,
+                       server: Server = .lrclib) async -> LyricsStore.State {
         do {
             if !album.isEmpty, duration > 0,
-               let record = try await get(title: title, artist: artist, album: album, duration: duration),
+               let record = try await get(title: title, artist: artist, album: album, duration: duration, server: server),
                let state = state(from: record) {
                 return state
             }
             let cleanTitle = clean(title)
             let mainArtist = primaryArtist(artist)
-            var candidates = try await search(["track_name": cleanTitle, "artist_name": mainArtist])
+            var candidates = try await search(["track_name": cleanTitle, "artist_name": mainArtist], server: server)
             if candidates.isEmpty {
-                candidates = try await search(["q": "\(cleanTitle) \(mainArtist)"])
+                candidates = try await search(["q": "\(cleanTitle) \(mainArtist)"], server: server)
             }
-            if let best = pickBest(candidates, duration: duration), let state = state(from: best) {
-                return state
+            if let best = pickBest(candidates, duration: duration) {
+                if let state = state(from: best) { return state }
+                // Karalyr の検索結果には歌詞の本文が入っていないので、ID で取り直す
+                if let full = try await record(id: best.id, server: server), let state = state(from: full) {
+                    return state
+                }
             }
             return .notFound
         } catch is CancellationError {
@@ -250,27 +343,34 @@ enum LRCLIBClient {
         return nil
     }
 
-    private static func get(title: String, artist: String, album: String, duration: Double) async throws -> Record? {
+    private static func get(title: String, artist: String, album: String, duration: Double,
+                            server: Server) async throws -> Record? {
         let data = try await request("/get", [
             "track_name": title, "artist_name": artist, "album_name": album, "duration": String(Int(duration.rounded())),
-        ])
+        ], server: server)
         guard let data else { return nil }
         return try JSONDecoder().decode(Record.self, from: data)
     }
 
-    private static func search(_ query: [String: String]) async throws -> [Record] {
-        guard let data = try await request("/search", query) else { return [] }
+    private static func record(id: Int, server: Server) async throws -> Record? {
+        guard let data = try await request("/get/\(id)", [:], server: server) else { return nil }
+        return try? JSONDecoder().decode(Record.self, from: data)
+    }
+
+    private static func search(_ query: [String: String], server: Server) async throws -> [Record] {
+        guard let data = try await request("/search", query, server: server) else { return [] }
         return (try? JSONDecoder().decode([Record].self, from: data)) ?? []
     }
 
-    private static func request(_ path: String, _ query: [String: String]) async throws -> Data? {
-        guard var components = URLComponents(string: base + path) else { return nil }
+    private static func request(_ path: String, _ query: [String: String], server: Server) async throws -> Data? {
+        guard var components = URLComponents(string: server.base + path) else { return nil }
         components.queryItems = query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
         // "+" はサーバー側で空白扱いになるため明示的にエンコードする
         components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         guard let url = components.url else { return nil }
         var request = URLRequest(url: url, timeoutInterval: 10)
         request.setValue("Aria/1.0 (Sonos music player for iOS)", forHTTPHeaderField: "User-Agent")
+        for (field, value) in server.headers { request.setValue(value, forHTTPHeaderField: field) }
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if status == 404 { return nil }
@@ -279,7 +379,12 @@ enum LRCLIBClient {
     }
 
     private static func pickBest(_ records: [Record], duration: Double) -> Record? {
-        let usable = records.filter { ($0.syncedLyrics?.isEmpty == false) || ($0.plainLyrics?.isEmpty == false) }
+        let withLyrics = records.filter { ($0.syncedLyrics?.isEmpty == false) || ($0.plainLyrics?.isEmpty == false) }
+        // Karalyr の検索結果は歌詞の本文を含まないので、そのときは長さの近さだけで選ぶ（本文はあとで ID で取る）
+        let usable = withLyrics.isEmpty ? records.filter { r in
+            guard duration > 0, let d = r.duration else { return true }
+            return abs(d - duration) <= 8
+        } : withLyrics
         func score(_ r: Record) -> Double {
             var s = 0.0
             if r.syncedLyrics?.isEmpty == false { s += 100 }
@@ -333,8 +438,6 @@ final class LyricsStore {
 
     private(set) var state: State = .idle
     private(set) var source: LyricsSource?
-    /// 翻訳を端末で機械翻訳したか（歌詞の下に「翻訳: Apple」と出す）
-    private(set) var machineTranslated = false
     /// 常にかける基準の補正（秒）。Sonos の再生位置の取得遅れを見込んで歌詞を少し早めに進める。
     /// 画面に出す補正値はこれを 0.0 として表す
     static let baseOffset = 0.6
@@ -373,6 +476,11 @@ final class LyricsStore {
         UserDefaults.standard.set(offset, forKey: Self.offsetKey)
     }
 
+    /// 端末に保存するときのキー。取得元の設定ごとに分ける
+    private static func diskKey(_ key: String) -> String {
+        "v2|\(key)"
+    }
+
     func load(title: String, artist: String, album: String, duration: Double) {
         let key = "\(title)|\(artist)".lowercased()
         guard key != currentKey else { return }
@@ -385,79 +493,44 @@ final class LyricsStore {
             source = nil
             return
         }
-        machineTranslated = false
         if let cached = cache[key] {
             (state, source) = cached
-            machineTranslated = machineTranslatedKeys.contains(key)
             return
         }
 
         state = .loading
         source = nil
+        let diskKey = Self.diskKey(key)
         task = Task { [weak self] in
+            // 端末に保存してあれば、通信せずにそれを使う
+            if let saved = await LyricsDiskCache.shared.load(diskKey) {
+                guard let self, !Task.isCancelled, self.currentKey == key else { return }
+                self.cache[key] = saved
+                (self.state, self.source) = saved
+                return
+            }
             let (result, source) = await LyricsService.lookup(title: title, artist: artist, album: album, duration: duration)
             guard let self, !Task.isCancelled, self.currentKey == key else { return }
-            if result != .failed && result != .idle { self.cache[key] = (result, source) }
+            if result != .failed && result != .idle {
+                self.cache[key] = (result, source)
+                await LyricsDiskCache.shared.save(diskKey, state: result, source: source)
+            }
             self.state = result
             self.source = source
         }
     }
 
-    // MARK: - 英語の歌詞の翻訳
-
-    /// 端末で翻訳した曲（キャッシュから戻したときに「翻訳: Apple」を出すため）
-    @ObservationIgnored private var machineTranslatedKeys: Set<String> = []
-
-    /// 英語の歌詞で、まだ翻訳が付いていないとき、翻訳する行を返す（キーは結果を戻すときの照合用）
-    func englishLinesToTranslate() -> (key: String, lines: [LyricLine])? {
-        guard LyricsService.translateEnglish,
-              Locale.current.language.languageCode?.identifier == "ja",
-              let key = currentKey, case .synced(let lines) = state else { return nil }
-        let textLines = lines.filter { !$0.text.isEmpty }
-        // 原文に翻訳が付いている歌詞（Apple Music の翻訳など）はそのまま使う
-        guard !textLines.isEmpty, textLines.allSatisfy({ $0.translation == nil }) else { return nil }
-        let allText = textLines.map(\.text).joined(separator: "\n")
-        let recognizer = NLLanguageRecognizer()
-        recognizer.processString(allText)
-        guard recognizer.dominantLanguage == .english, Self.japaneseRatio(allText) < 0.05 else { return nil }
-        return (key, textLines)
-    }
-
-    /// 文字のうち、ひらがな・カタカナ・漢字の割合。
-    /// 日本語と英語が混ざった歌詞（日本の曲によくある）は、英語と判定されても翻訳しない
-    static func japaneseRatio(_ text: String) -> Double {
-        var letters = 0, japanese = 0
-        for scalar in text.unicodeScalars where scalar.properties.isAlphabetic {
-            letters += 1
-            switch scalar.value {
-            case 0x3040...0x30FF, 0x31F0...0x31FF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xFF66...0xFF9F:
-                japanese += 1
-            default:
-                break
-            }
-        }
-        return letters == 0 ? 0 : Double(japanese) / Double(letters)
-    }
-
-    /// 端末の翻訳結果（行の id → 日本語）を歌詞に付ける。曲が変わっていたら捨てる
-    func applyTranslations(_ translations: [Int: String], key: String) {
-        guard key == currentKey, !translations.isEmpty, case .synced(var lines) = state else { return }
-        for index in lines.indices {
-            if let text = translations[lines[index].id], lines[index].translation == nil {
-                lines[index].translation = text
-            }
-        }
-        state = .synced(lines)
-        machineTranslated = true
-        machineTranslatedKeys.insert(key)
-        if let cached = cache[key] { cache[key] = (.synced(lines), cached.1) }
-    }
-
     func retry() {
         guard let request = lastRequest else { return }
-        cache["\(request.title)|\(request.artist)".lowercased()] = nil
+        let key = "\(request.title)|\(request.artist)".lowercased()
+        cache[key] = nil
+        let diskKey = Self.diskKey(key)
         currentKey = nil
-        load(title: request.title, artist: request.artist, album: request.album, duration: request.duration)
+        // 保存してある結果を消し終えてから取り直す（先に読むと、消す前の古い結果を使ってしまう）
+        Task {
+            await LyricsDiskCache.shared.remove(diskKey)
+            self.load(title: request.title, artist: request.artist, album: request.album, duration: request.duration)
+        }
     }
 
     func clear() {
@@ -465,13 +538,14 @@ final class LyricsStore {
         currentKey = nil
         state = .idle
         source = nil
-        machineTranslated = false
     }
 
-    /// 取得元の設定を変えたときに呼ぶ
-    func resetCache() {
+    /// メモリと端末に保存した歌詞をすべて消して、いまの曲の歌詞を取り直す
+    func clearAllCaches() async {
         cache.removeAll()
-        machineTranslatedKeys.removeAll()
-        retry()
+        await LyricsDiskCache.shared.removeAll()
+        guard let request = lastRequest else { return }
+        currentKey = nil
+        load(title: request.title, artist: request.artist, album: request.album, duration: request.duration)
     }
 }

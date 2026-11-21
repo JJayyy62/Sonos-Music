@@ -9,6 +9,7 @@ struct AriaApp: App {
 
     init() {
         Self.styleNavigationBar()
+        LyricsService.removeLegacySourceSettings()
     }
 
     var body: some Scene {

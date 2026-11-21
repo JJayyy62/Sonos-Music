@@ -100,7 +100,8 @@ struct CatalogTrackButton: View {
             TrackRow(title: track.title,
                      subtitle: [track.artist, track.album].compactMap { $0?.nilIfEmpty }.joined(separator: " · "),
                      artworkURL: showsArtwork ? track.artworkURL : nil,
-                     trailing: track.duration.map(TimeFormat.display))
+                     trailing: track.duration.map(TimeFormat.display),
+                     explicit: track.explicit)
         }
         .buttonStyle(.plain)
         .contextMenu { EnqueueMenu(content: track.content) }
@@ -298,10 +299,10 @@ struct ServiceConnectCard: View {
             return "連携すると、Apple Musicのカタログ検索・おすすめの表示、曲ごとのロスレス / Dolby Atmos情報の取得ができます。再生はSonosに登録済みのApple Musicアカウントで行われます。"
         case .spotify:
             return spotify.clientID.isEmpty
-                ? "Spotifyの検索・プレイリストの表示には、設定 > 音楽サービス > Spotify で Client ID の登録が必要です。共有リンクからの再生はすぐに使えます。"
+                ? "Spotifyの検索・プレイリストの表示には、設定 > 音楽サービス > Spotify で Client ID の登録が必要です。共有リンクからの再生は Client ID なしで使えます（最初に1回、SonosアプリでSpotifyの曲をお気に入りに追加しておいてください）。"
                 : "ログインすると、Spotifyの検索・保存したアルバム・プレイリストを表示できます。再生はSonosに登録済みのSpotifyアカウントで行われます。"
         case .amazonMusic:
-            return "Amazon Musicには公開された検索APIがないため、Amazon Musicアプリの「共有 > リンクをコピー」で得たリンクから再生します。Sonosのお気に入りに登録した項目はホームに表示されます。"
+            return "Amazon Musicには公開された検索APIがないため、Amazon Musicアプリの「共有 > リンクをコピー」で得たリンクから再生します。最初に1回、SonosアプリでAmazon Musicの曲をお気に入りに追加しておいてください（アカウントを見分けるため。お気に入りはホームにも表示されます）。"
         }
     }
 }
@@ -393,6 +394,18 @@ struct LinkPlaySheet: View {
                     Text(hint)
                 }
 
+                if let parsed, store.detectedSerials[parsed.service] == nil {
+                    // Sonos 上のアカウント番号とトークンはお気に入りなどからしか分からない。
+                    // 分からないまま再生すると Sonos に「アクセスを拒否しました」と断られるので、先に案内する
+                    Section {
+                        Label {
+                            Text("Sonos上の\(parsed.service.displayName)のアカウントがまだ分かりません。このまま再生すると「アクセスを拒否しました」になることがあります。純正のSonosアプリで\(parsed.service.displayName)の曲を1つお気に入りに追加してから、Ariaを開き直してください。")
+                                .font(.footnote)
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        }
+                    }
+                }
                 if let parsed {
                     Section("再生する内容") {
                         HStack {

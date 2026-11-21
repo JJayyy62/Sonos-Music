@@ -11,6 +11,12 @@ actor ImageLoader {
 
     init() {
         cache.countLimit = 300
+        // 高解像度のアートワーク（1200×1200 で約 5.8MB）も扱うので、枚数だけでなくメモリ量でも上限を設ける
+        cache.totalCostLimit = 150 * 1024 * 1024
+    }
+
+    func removeAll() {
+        cache.removeAllObjects()
     }
 
     func image(for url: URL) async -> UIImage? {
@@ -24,7 +30,10 @@ actor ImageLoader {
         inflight[url] = task
         let image = await task.value
         inflight[url] = nil
-        if let image { cache.setObject(image, forKey: url as NSURL) }
+        if let image {
+            let pixels = (image.size.width * image.scale) * (image.size.height * image.scale)
+            cache.setObject(image, forKey: url as NSURL, cost: Int(pixels) * 4)
+        }
         return image
     }
 }

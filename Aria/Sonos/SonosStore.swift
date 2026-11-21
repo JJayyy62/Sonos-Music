@@ -85,6 +85,19 @@ final class SonosStore {
     private(set) var quality: AudioQuality?
     /// 再生中の曲の、端末の言語での表記（Sonos がローマ字で返す日本の曲名など）。なければ nil
     private(set) var trackNames: TrackNames?
+    /// 再生中の曲の高解像度アートワーク（Apple のカタログの 1200×1200）。見つからなければ nil
+    private(set) var highResArtworkURL: URL?
+    /// Spotify Connect で再生中のときの情報（次の曲は Spotify が決め、Sonos のキューは使われない）
+    private(set) var spotifyConnect: SpotifyConnectInfo?
+
+    struct SpotifyConnectInfo: Equatable {
+        var contextName: String?
+        /// 1曲だけを再生した（アルバムやプレイリストではない）。次からは Spotify のおすすめが流れる
+        var singleTrack: Bool
+        var nextName: String?
+        var nextArtist: String?
+        var nextImageURL: URL?
+    }
     private(set) var favorites: [DIDLItem] = []
     private(set) var sleepTimerRemaining: Int?
     private(set) var crossfade = false
@@ -106,6 +119,8 @@ final class SonosStore {
     var displayTitle: String? { trackNames?.title ?? track?.title }
     var displayArtist: String? { trackNames?.artist ?? track?.artist }
     var displayAlbum: String? { trackNames?.album ?? track?.album }
+    /// 画面に出すアートワーク。Sonos が渡す画像は 400×400 なので、高解像度版が見つかればそちらを使う
+    var displayArtworkURL: URL? { highResArtworkURL ?? track?.artworkURL }
 
     /// 再生位置（ポーリングの間はローカルで補間する）
     func position(at date: Date = Date()) -> Double {
@@ -281,16 +296,32 @@ final class SonosStore {
         }
         if track?.kind == .tv, let q = await homeTheaterQuality(group), q != quality {
             quality = q
-        } else if let track, track.kind != .tv, isPlaying {
+        } else if let track, track.kind != .tv {
+            let identity = track.identity
+            let reported = await SonosLocalAPI.shared.currentTrack(host: group.coordinator.host)
+            guard self.track?.identity == identity else { return }
             // 曲の始まりはステレオ（Lossless）で届き、少したってから Dolby Atmos に切り替わることがある。
             // 再生中はスピーカーが報告する品質を見続けて、変わったら表示も合わせる
-            let identity = track.identity
-            if let reported = await SonosLocalAPI.shared.currentTrack(host: group.coordinator.host)?.quality,
-               let latest = AudioQualityDetector.fromSonos(reported),
-               self.track?.identity == identity, latest != quality {
+            if isPlaying, let q = reported?.quality, let latest = AudioQualityDetector.fromSonos(q), latest != quality {
                 quality = latest
             }
+            updateSpotifyConnect(reported)
+        } else {
+            updateSpotifyConnect(nil)
         }
+    }
+
+    private func updateSpotifyConnect(_ reported: SonosLocalAPI.CurrentTrack?) {
+        guard let reported, reported.isSpotifyConnect else {
+            if spotifyConnect != nil { spotifyConnect = nil }
+            return
+        }
+        let type = reported.containerType ?? ""
+        let info = SpotifyConnectInfo(
+            contextName: reported.containerName,
+            singleTrack: !(type.contains("album") || type.contains("playlist") || type.contains("artist")),
+            nextName: reported.nextName, nextArtist: reported.nextArtist, nextImageURL: reported.nextImageURL)
+        if info != spotifyConnect { spotifyConnect = info }
     }
 
     private func apply(position: PositionInfo, state: TransportState, group: SonosGroup) {
@@ -325,6 +356,7 @@ final class SonosStore {
     private func trackDidChange() {
         quality = nil
         trackNames = nil
+        highResArtworkURL = nil
         guard let track, let group = selectedGroup else {
             lyrics.clear()
             return
@@ -338,6 +370,24 @@ final class SonosStore {
         learnAccounts(from: [track.uri, track.rawMetadata])
         checkQualityAtStart(track, group: group)
         localizeNames(track)
+        loadHighResArtwork(track)
+    }
+
+    /// 音楽配信の曲は、Apple のカタログで同じ曲を探して高解像度のアートワークを使う。
+    /// （曲名の日本語化と同じ照合を使うので、問い合わせは1曲につき1回で済む）
+    private func loadHighResArtwork(_ track: TrackInfo) {
+        guard track.kind == .track, StreamingService.detect(in: track.uri) != nil else { return }
+        let identity = track.identity
+        Task {
+            let match = await TrackNameLocalizer.shared.match(
+                title: track.title, artist: track.artist, album: track.album, duration: track.duration,
+                catalogSongID: AppleMusicSonos.catalogSongID(in: track.uri))
+            guard let url = match?.artworkURL, self.track?.identity == identity else { return }
+            // 画像を先に読み込んでから差し替え、読み込み中に表示が消えないようにする
+            _ = await ImageLoader.shared.image(for: url)
+            guard self.track?.identity == identity else { return }
+            self.highResArtworkURL = url
+        }
     }
 
     /// 曲が始まった直後は、すぐと 1・2・3・5・7 秒後に音質を確認する。
@@ -761,11 +811,47 @@ final class SonosStore {
 
     /// Apple Music / Spotify / Amazon Music の曲・アルバム・プレイリストを、Sonosに登録済みのアカウントで再生する
     func play(_ content: ServiceContent, startIndex: Int = 0, shuffle: Bool? = nil) {
+        if content.service == .spotify {
+            playSpotify(content)
+            return
+        }
         let candidates = SonosServiceURI.candidates(for: content, account: account(for: content.service))
         replaceQueueAndPlay(candidates: candidates, startTrack: startIndex + 1, shuffle: shuffle)
     }
 
+    /// Spotify は、Sonos が UPnP での追加を拒否する（純正アプリが保存したお気に入りでも「アクセスを拒否」）ため、
+    /// 純正 Sonos アプリと同じローカル API で再生する。再生は Spotify Connect で行われ、キューは置き換わる
+    private func playSpotify(_ content: ServiceContent) {
+        guard let group = selectedGroup else {
+            show(SonosError.noGroup)
+            return
+        }
+        let type: String
+        switch content.kind {
+        case .track: type = "TRACK"
+        case .album: type = "ALBUM"
+        case .playlist: type = "PLAYLIST"
+        }
+        let serial = account(for: .spotify).serial
+        let objectID = "spotify:\(content.kind.rawValue):\(content.id)"
+        Task {
+            do {
+                try await SonosLocalAPI.shared.loadContent(host: group.coordinator.host, type: type,
+                                                           serviceID: StreamingService.spotify.sonosServiceID,
+                                                           objectID: objectID, accountSerial: serial)
+            } catch {
+                self.show(error)
+            }
+            await self.pollImmediately()
+        }
+    }
+
     func enqueue(_ content: ServiceContent, mode: EnqueueMode) {
+        if content.service == .spotify {
+            // Sonos のこの API には「キューに追加」がないため、Spotify は再生（置き換え）だけに対応する
+            show(message: "Spotifyは「次に再生」「最後に追加」に対応していません。「再生」を使ってください")
+            return
+        }
         enqueue(candidates: SonosServiceURI.candidates(for: content, account: account(for: content.service)), mode: mode)
     }
 
