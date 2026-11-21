@@ -26,6 +26,9 @@ struct RootView: View {
     @State private var section: Section = .home
     @State private var showNowPlaying = false
     @Namespace private var playerTransition
+    #if DEBUG
+    @State private var lyricsPreview = LyricsPreviewRequest.fromLaunchArguments
+    #endif
 
     /// ドックの高さ（スクロールの下端余白に使う）
     static let dockClearance: CGFloat = 140
@@ -49,6 +52,9 @@ struct RootView: View {
             NowPlayingView()
                 .navigationTransition(.zoom(sourceID: "miniPlayer", in: playerTransition))
         }
+        #if DEBUG
+        .fullScreenCover(item: $lyricsPreview) { LyricsPreviewView(request: $0) }
+        #endif
         .sonosToast()
         .background(RotationGestureInstaller())
         .task { store.start() }

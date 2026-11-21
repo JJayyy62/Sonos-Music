@@ -29,6 +29,7 @@ struct LyricsPanel: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { store.lyrics.retryTranslationIfFailed() }
     }
 
     private func message(_ text: String, symbol: String) -> some View {
@@ -51,7 +52,8 @@ struct SyncedLyricsView: View {
         TimelineView(.animation(minimumInterval: wordSynced ? 1.0 / 30 : 0.1, paused: !store.isPlaying)) { context in
             let time = store.position(at: context.date) + store.lyrics.timingOffset
             LyricsScroller(lines: lines, activeIndex: LyricLine.activeIndex(in: lines, at: time), time: time,
-                           source: store.lyrics.source) { line in
+                           source: store.lyrics.source,
+                           translationStatus: store.lyrics.translationStatus) { line in
                 store.seek(to: max(0, line.time - store.lyrics.timingOffset))
             }
         }
@@ -63,12 +65,22 @@ struct LyricsScroller: View {
     let activeIndex: Int?
     let time: Double
     let source: LyricsSource?
+    var translationStatus: LyricsStore.TranslationStatus = .none
     let onTap: (LyricLine) -> Void
 
     @State private var userScrolling = false
     @State private var resumeTask: Task<Void, Never>?
 
     private let anchor = UnitPoint(x: 0, y: 0.22)
+
+    private var translationNote: String? {
+        switch translationStatus {
+        case .none: return nil
+        case .translating: return "翻訳中…（Gemini）"
+        case .translated(let language): return "翻訳: Gemini（\(LyricsTranslator.displayName(language))）"
+        case .failed(let reason): return "翻訳できませんでした: \(reason)"
+        }
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -90,6 +102,11 @@ struct LyricsScroller: View {
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.4))
                             .padding(.top, 12)
+                    }
+                    if let note = translationNote {
+                        Text(note)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.4))
                     }
                     Color.clear.frame(height: 320)
                 }

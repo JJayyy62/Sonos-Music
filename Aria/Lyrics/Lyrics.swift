@@ -438,6 +438,15 @@ final class LyricsStore {
 
     private(set) var state: State = .idle
     private(set) var source: LyricsSource?
+
+    /// Gemini での翻訳の状態（歌詞の画面の一番下に出す）
+    enum TranslationStatus: Equatable {
+        case none
+        case translating
+        case translated(language: String)
+        case failed(String)
+    }
+    private(set) var translationStatus: TranslationStatus = .none
     /// 常にかける基準の補正（秒）。Sonos の再生位置の取得遅れを見込んで歌詞を少し早めに進める。
     /// 画面に出す補正値はこれを 0.0 として表す
     static let baseOffset = 0.6
@@ -462,6 +471,9 @@ final class LyricsStore {
     }
 
     @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var translationTask: Task<Void, Never>?
+    /// 翻訳を付ける前の歌詞（設定を変えたときに付け直すため）
+    @ObservationIgnored private var untranslatedLines: [LyricLine]?
     @ObservationIgnored private var cache: [String: (State, LyricsSource?)] = [:]
     @ObservationIgnored private var currentKey: String?
     @ObservationIgnored private var lastRequest: (title: String, artist: String, album: String, duration: Double)?
@@ -487,6 +499,7 @@ final class LyricsStore {
         currentKey = key
         lastRequest = (title, artist, album, duration)
         task?.cancel()
+        resetTranslation()
 
         guard !title.isEmpty else {
             state = .idle
@@ -494,7 +507,7 @@ final class LyricsStore {
             return
         }
         if let cached = cache[key] {
-            (state, source) = cached
+            show(cached.0, source: cached.1)
             return
         }
 
@@ -506,7 +519,7 @@ final class LyricsStore {
             if let saved = await LyricsDiskCache.shared.load(diskKey) {
                 guard let self, !Task.isCancelled, self.currentKey == key else { return }
                 self.cache[key] = saved
-                (self.state, self.source) = saved
+                self.show(saved.0, source: saved.1)
                 return
             }
             let (result, source) = await LyricsService.lookup(title: title, artist: artist, album: album, duration: duration)
@@ -515,8 +528,79 @@ final class LyricsStore {
                 self.cache[key] = (result, source)
                 await LyricsDiskCache.shared.save(diskKey, state: result, source: source)
             }
-            self.state = result
-            self.source = source
+            self.show(result, source: source)
+        }
+    }
+
+    /// 歌詞を表示し、必要なら翻訳を始める
+    private func show(_ newState: State, source: LyricsSource?) {
+        state = newState
+        self.source = source
+        translateIfNeeded()
+    }
+
+    private func resetTranslation() {
+        translationTask?.cancel()
+        translationTask = nil
+        untranslatedLines = nil
+        translationStatus = .none
+    }
+
+    /// 翻訳の設定（オン・オフ、言語、API キー）を変えたときに、いまの歌詞の翻訳を付け直す
+    func refreshTranslation() {
+        let lines = untranslatedLines
+        resetTranslation()
+        if let lines { state = .synced(lines) }
+        translateIfNeeded()
+    }
+
+    /// 翻訳に失敗していたら、もう一度試す（歌詞の画面を開いたとき）
+    func retryTranslationIfFailed() {
+        if case .failed = translationStatus { refreshTranslation() }
+    }
+
+    /// 時間同期の歌詞を Gemini で訳して、各行の下に付ける。
+    /// 歌詞にもともと翻訳が付いている曲、歌詞が翻訳先の言語で書かれている曲は訳さない
+    private func translateIfNeeded() {
+        guard case .synced(let lines) = state, let key = currentKey,
+              LyricsTranslator.isEnabled, let apiKey = LyricsTranslator.apiKey,
+              !lines.contains(where: { !($0.translation ?? "").isEmpty }) else { return }
+        let targets = lines.filter { !$0.isInterlude && !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }
+        let texts = targets.map(\.text)
+        let language = LyricsTranslator.targetLanguage
+        guard LyricsTranslator.needsTranslation(texts, to: language) else { return }
+
+        untranslatedLines = lines
+        // 歌詞の本文も鍵に含める（歌詞が取り直されて変わったら訳し直す）
+        let cacheKey = "v1|\(language)|\(key)|\(texts.joined(separator: "\n"))"
+        translationTask = Task { [weak self] in
+            var translated = await LyricsDiskCache.shared.loadTranslation(cacheKey)
+            if translated == nil {
+                guard let self, !Task.isCancelled, self.currentKey == key else { return }
+                self.translationStatus = .translating
+                do {
+                    let result = try await LyricsTranslator.translate(texts, to: language, apiKey: apiKey)
+                    await LyricsDiskCache.shared.saveTranslation(cacheKey, lines: result)
+                    translated = result
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard !Task.isCancelled, self.currentKey == key else { return }
+                    self.translationStatus = .failed(error.localizedDescription)
+                    return
+                }
+            }
+            guard let self, !Task.isCancelled, self.currentKey == key, let translated else { return }
+            var byID: [Int: String] = [:]
+            for (line, text) in zip(targets, translated) where !text.isEmpty && text != line.text {
+                byID[line.id] = text
+            }
+            self.state = .synced(lines.map { line in
+                var line = line
+                line.translation = byID[line.id]
+                return line
+            })
+            self.translationStatus = .translated(language: language)
         }
     }
 
@@ -535,6 +619,7 @@ final class LyricsStore {
 
     func clear() {
         task?.cancel()
+        resetTranslation()
         currentKey = nil
         state = .idle
         source = nil

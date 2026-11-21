@@ -13,6 +13,10 @@ struct SettingsView: View {
     @State private var showLink = false
     @State private var lyricsCacheUsage: (count: Int, bytes: Int)?
     @State private var confirmClearCache = false
+    @AppStorage(LyricsTranslator.enabledKey) private var translationEnabled = true
+    @AppStorage(LyricsTranslator.languageKey) private var translationLanguage = ""
+    @State private var geminiKeyDraft = LyricsTranslator.apiKey ?? ""
+    @State private var hasGeminiKey = LyricsTranslator.apiKey != nil
 
     var body: some View {
         NavigationStack {
@@ -95,6 +99,43 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("歌詞を翻訳する", isOn: $translationEnabled)
+                        .onChange(of: translationEnabled) { _, _ in store.lyrics.refreshTranslation() }
+                    Picker("翻訳先の言語", selection: $translationLanguage) {
+                        Text("端末の言語（\(LyricsTranslator.displayName(LyricsTranslator.deviceLanguage))）").tag("")
+                        ForEach(LyricsTranslator.languages, id: \.self) { language in
+                            Text(LyricsTranslator.displayName(language)).tag(language)
+                        }
+                    }
+                    .onChange(of: translationLanguage) { _, _ in store.lyrics.refreshTranslation() }
+                    SecureField("Gemini API キー", text: $geminiKeyDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .onSubmit(saveGeminiKey)
+                    HStack {
+                        Button(hasGeminiKey ? "キーを更新" : "キーを保存", action: saveGeminiKey)
+                            .disabled(geminiKeyDraft.trimmingCharacters(in: .whitespaces).isEmpty
+                                      || geminiKeyDraft == (LyricsTranslator.apiKey ?? ""))
+                        Spacer()
+                        if hasGeminiKey {
+                            Button("キーを削除", role: .destructive) {
+                                geminiKeyDraft = ""
+                                saveGeminiKey()
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    Link("API キーを取得（Google AI Studio）",
+                         destination: URL(string: "https://aistudio.google.com/apikey")!)
+                } header: {
+                    Text("歌詞の翻訳")
+                } footer: {
+                    Text(hasGeminiKey
+                         ? "時間同期の歌詞を Google の Gemini で訳し、各行の下に表示します。歌詞に翻訳が付いている曲や、翻訳先の言語で書かれた曲は訳しません。訳した結果は端末に保存し、同じ曲は通信せずに表示します。歌詞の本文が Google に送られます。"
+                         : "Google AI Studio で無料の API キーを取得して入力すると、歌詞を翻訳できます。キーは端末のキーチェーンに保存されます。")
+                }
+
+                Section {
                     ForEach(StreamingService.allCases) { service in
                         NavigationLink {
                             ServiceSettingsView(service: service)
@@ -122,7 +163,7 @@ struct SettingsView: View {
                 } header: {
                     Text("キャッシュ")
                 } footer: {
-                    Text("一度表示した歌詞は端末に保存し、次からは通信せずに表示します（見つかった歌詞は30日、見つからなかった結果は1日で取り直します）。削除すると、保存した歌詞と、アートワーク・曲名の日本語表記の一時データを消して、次に表示するときに取り直します。")
+                    Text("一度表示した歌詞は端末に保存し、次からは通信せずに表示します（見つかった歌詞は30日、見つからなかった結果は1日で取り直します）。削除すると、保存した歌詞と翻訳、アートワーク・曲名の日本語表記の一時データを消して、次に表示するときに取り直します。")
                 }
                 .task { lyricsCacheUsage = await LyricsDiskCache.shared.usage() }
 
@@ -166,6 +207,13 @@ struct SettingsView: View {
         case .spotify: return spotify.isConnected ? "ログイン済み" : (spotify.clientID.isEmpty ? "未設定" : "未ログイン")
         case .amazonMusic: return store.linkedServices.contains(.amazonMusic) ? "Sonosで検出" : "リンクで再生"
         }
+    }
+
+    private func saveGeminiKey() {
+        LyricsTranslator.apiKey = geminiKeyDraft
+        geminiKeyDraft = LyricsTranslator.apiKey ?? ""
+        hasGeminiKey = LyricsTranslator.apiKey != nil
+        store.lyrics.refreshTranslation()
     }
 
     private var connectionLabel: String {

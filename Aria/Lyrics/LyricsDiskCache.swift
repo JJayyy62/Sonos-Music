@@ -5,8 +5,7 @@ import Foundation
 ///
 /// - 見つかった歌詞は 30 日、「見つからなかった」「インストゥルメンタル」は 1 日で期限切れにする
 ///   （あとから歌詞が追加・改善されたときに取り直せるように）
-/// - 取得元の設定（Better Lyrics・LRCLIB・Karalyr のオン・オフ）ごとに別々に保存する。
-///   設定を変えたときに、別の設定で取った結果を使ってしまわないため
+/// - Gemini で訳した歌詞の翻訳も、翻訳先の言語ごとに 30 日保存する（同じ曲を毎回訳し直さないため）
 /// - Caches フォルダなので、端末の空きが少ないときは iOS が消すことがある
 actor LyricsDiskCache {
     static let shared = LyricsDiskCache()
@@ -66,18 +65,55 @@ actor LyricsDiskCache {
         try? data.write(to: fileURL(for: key), options: .atomic)
     }
 
+    // MARK: 翻訳
+
+    private struct TranslationEntry: Codable {
+        var lines: [String]
+        var savedAt: Date
+    }
+
+    /// 保存してある翻訳（歌詞の行と同じ順番）。なければ、または期限切れなら nil
+    func loadTranslation(_ key: String) -> [String]? {
+        let url = translationURL(for: key)
+        guard let data = try? Data(contentsOf: url),
+              let entry = try? JSONDecoder().decode(TranslationEntry.self, from: data) else { return nil }
+        guard Date().timeIntervalSince(entry.savedAt) < Self.foundLifetime else {
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
+        return entry.lines
+    }
+
+    func saveTranslation(_ key: String, lines: [String]) {
+        guard let data = try? JSONEncoder().encode(TranslationEntry(lines: lines, savedAt: Date())) else { return }
+        let url = translationURL(for: key)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
+    }
+
+    /// 翻訳は歌詞とは別のフォルダ（Lyrics/Translations）に置く（「保存した歌詞」の曲数に数えないため）
+    private func translationURL(for key: String) -> URL {
+        let hash = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+        return directory.appendingPathComponent("Translations", isDirectory: true)
+            .appendingPathComponent(hash).appendingPathExtension("json")
+    }
+
     func remove(_ key: String) {
         try? FileManager.default.removeItem(at: fileURL(for: key))
     }
 
-    /// 保存してある歌詞の件数と合計サイズ（バイト）
+    /// 保存してある歌詞の曲数と、翻訳を含めた合計サイズ（バイト）
     func usage() -> (count: Int, bytes: Int) {
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-        let bytes = files.reduce(0) { total, url in
+        func files(in folder: URL) -> [URL] {
+            ((try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.fileSizeKey]))
+                ?? []).filter { $0.pathExtension == "json" }
+        }
+        let lyrics = files(in: directory)
+        let translations = files(in: directory.appendingPathComponent("Translations", isDirectory: true))
+        let bytes = (lyrics + translations).reduce(0) { total, url in
             total + ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
-        return (files.count, bytes)
+        return (lyrics.count, bytes)
     }
 
     func removeAll() {
