@@ -124,9 +124,9 @@ actor TrackNameLocalizer {
                 // 検索の上位に入らなかった版。アーティストのアルバム一覧と曲目から探す
                 switch await explicitFallback(results: results, title: title, artist: artist, album: album,
                                               duration: duration) {
-                case .found(let song):
+                case .found(let song, let isSameAlbum):
                     // アルバムが一致しなかったときは、検索で見つかった版を優先する
-                    chosen = (Self.sameAlbum(song, album) || anyAlbum == nil) ? song : anyAlbum
+                    chosen = (isSameAlbum || anyAlbum == nil) ? song : anyAlbum
                 case .notFound:
                     chosen = anyAlbum
                 case .retryLater:
@@ -171,7 +171,7 @@ actor TrackNameLocalizer {
     /// 2. アーティストのアルバム一覧（Explicit のアルバムも含まれる）を取る
     /// 3. Sonos が示すアルバム名と同じアルバムがあればその曲目を、なければアルバムをまとめて曲目を取り、曲名で照合する
     private enum FallbackResult {
-        case found(Song)
+        case found(Song, sameAlbum: Bool)
         case notFound
         case retryLater
     }
@@ -194,19 +194,47 @@ actor TrackNameLocalizer {
         else { return .retryLater }
 
         var albumIDs = albums.compactMap(\.collectionId)
+        var sameAlbumID: Int?
         if let album, let same = albums.first(where: { $0.collectionName.map(Self.normalized) == Self.normalized(album) }),
            let id = same.collectionId {
             albumIDs = [id]
+            sameAlbumID = id
         }
         guard !albumIDs.isEmpty else { return .notFound }
         guard takeRequestSlot() else { return .retryLater }
         guard let tracks = await request("lookup", ["id": albumIDs.prefix(30).map(String.init).joined(separator: ","),
                                                     "entity": "song", "limit": "200", "country": "us"])
         else { return .retryLater }
-        guard let song = Self.bestMatch(in: tracks, title: title, artist: artist, duration: duration) else {
-            return .notFound
+        if let song = Self.bestMatch(in: tracks, title: title, artist: artist, duration: duration) {
+            return .found(song, sameAlbum: Self.sameAlbum(song, album))
         }
-        return .found(song)
+        // 米国のストアにはアルバムの情報だけあって、曲が配信されていないことがある
+        // （例：ずっと真夜中でいいのに。の「朗らかな皮膚とて不服」）。アルバムが特定できているときは、
+        // 端末の地域のストアでそのアルバムの曲目を引き、曲名か長さで同じ曲を探す
+        guard let sameAlbumID else { return .notFound }
+        return await localAlbumTrack(albumID: sameAlbumID, title: title, duration: duration)
+    }
+
+    /// 端末の地域のストアで、アルバムの曲目から同じ曲を探す。
+    /// 曲名は地域の表記（日本語）になっていることがあるので、曲名が一致しなければ長さで照合する。
+    /// 同じアルバムの中で長さが ±2 秒以内の曲がひとつだけのときに限る（取り違えを防ぐため）
+    private func localAlbumTrack(albumID: Int, title: String, duration: Double) async -> FallbackResult {
+        guard takeRequestSlot() else { return .retryLater }
+        guard let tracks = await request("lookup", ["id": String(albumID), "entity": "song", "limit": "200",
+                                                    "country": Self.country,
+                                                    "lang": Self.prefersJapanese ? "ja_jp" : "en_us"])
+        else { return .retryLater }
+        let songs = tracks.filter { $0.kind == "song" && $0.trackId != nil }
+        if let same = songs.first(where: { $0.trackName.map(Self.normalized) == Self.normalized(title) }) {
+            return .found(same, sameAlbum: true)
+        }
+        guard duration > 0 else { return .notFound }
+        let close = songs.filter { song in
+            guard let millis = song.trackTimeMillis else { return false }
+            return abs(Double(millis) / 1000 - duration) <= 2
+        }
+        guard close.count == 1, let song = close.first else { return .notFound }
+        return .found(song, sameAlbum: true)
     }
 
     /// 曲が、Sonos が示すアルバムの版か（アルバム名が分からないときは問わない）
