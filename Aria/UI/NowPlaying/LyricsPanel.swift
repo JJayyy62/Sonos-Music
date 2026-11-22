@@ -77,7 +77,8 @@ struct LyricsScroller: View {
         switch translationStatus {
         case .none: return nil
         case .translating: return "翻訳中…（Gemini）"
-        case .translated(let language): return "翻訳: Gemini（\(LyricsTranslator.displayName(language))）"
+        case .translated(_, let model):
+            return "翻訳: " + (model.map(LyricsTranslator.displayName(model:)) ?? "Gemini")
         case .failed(let reason): return "翻訳できませんでした: \(reason)"
         }
     }
@@ -97,16 +98,22 @@ struct LyricsScroller: View {
                         .id(line.id)
                         .onTapGesture { onTap(line) }
                     }
-                    if let source {
-                        Text("歌詞提供: \(source.rawValue)")
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.4))
-                            .padding(.top, 12)
-                    }
-                    if let note = translationNote {
-                        Text(note)
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.4))
+                    // 歌詞の取得元と翻訳の表示は、行間を空けずにまとめて出す
+                    if source != nil || translationNote != nil {
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let source {
+                                Text("歌詞提供: \(source.rawValue)")
+                            }
+                            if let note = translationNote {
+                                Text(note)
+                            }
+                            if case .translated = translationStatus {
+                                Text("翻訳は AI によるもので、正確でない場合があります。")
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.4))
+                        .padding(.top, 12)
                     }
                     Color.clear.frame(height: 320)
                 }

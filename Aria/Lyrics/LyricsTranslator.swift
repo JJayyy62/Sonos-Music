@@ -101,8 +101,32 @@ enum LyricsTranslator {
         return a.split(separator: "-").first == b.split(separator: "-").first
     }
 
-    /// 歌詞の各行を訳す。返す配列は `texts` と同じ長さで、訳さない行（翻訳先の言語で書かれている行など）は空文字
-    static func translate(_ texts: [String], to language: String, apiKey: String) async throws -> [String] {
+    /// 訳した結果
+    struct Translation: Sendable {
+        /// `texts` と同じ長さ。訳さない行（翻訳先の言語で書かれている行など）は空文字
+        var lines: [String]
+        /// 実際に訳したモデル（例: "gemini-3.8-flash-lite"）。別名（"-latest"）で頼んでも、返事に入っている実際の名前
+        var model: String
+    }
+
+    /// 表示用のモデル名（"gemini-3.8-flash-lite" → "Gemini 3.8 Flash-Lite"）
+    static func displayName(model: String) -> String {
+        model.split(separator: "-").map { part in
+            switch part.lowercased() {
+            case "gemini": return "Gemini"
+            case "flash": return "Flash"
+            case "lite": return "Lite"
+            case "pro": return "Pro"
+            case "latest": return "Latest"
+            default: return String(part)
+            }
+        }
+        .joined(separator: " ")
+        .replacingOccurrences(of: "Flash Lite", with: "Flash-Lite")
+    }
+
+    /// 歌詞の各行を訳す
+    static func translate(_ texts: [String], to language: String, apiKey: String) async throws -> Translation {
         var candidates = models
         if let discovered = UserDefaults.standard.string(forKey: discoveredModelKey) {
             if !candidates.contains(discovered) { candidates.append(discovered) }
@@ -177,7 +201,7 @@ enum LyricsTranslator {
 
     /// Gemini は混雑時に 503 などを返すことがあるので、少し待って 2 回まで試し直す
     private static func translateRetrying(_ texts: [String], to language: String, apiKey: String,
-                                          model: String) async throws -> [String] {
+                                          model: String) async throws -> Translation {
         for delay in [1.5, 4.0] {
             do {
                 return try await translate(texts, to: language, apiKey: apiKey, model: model)
@@ -189,7 +213,7 @@ enum LyricsTranslator {
     }
 
     private static func translate(_ texts: [String], to language: String, apiKey: String,
-                                  model: String) async throws -> [String] {
+                                  model: String) async throws -> Translation {
         // モデルが受け付ける一番軽い思考の設定を、軽い順に試す
         let settings: [[String: Any]?] = model.hasPrefix("gemini-2")
             ? [["thinkingBudget": 0], nil]
@@ -213,7 +237,7 @@ enum LyricsTranslator {
     /// `thinking`：モデルの「考える」処理（思考）を軽くする設定。訳すだけなので深く考える必要はなく、
     /// 既定のまま考えさせると 1 曲で 1 分以上かかってタイムアウトすることがある
     private static func translate(_ texts: [String], to language: String, apiKey: String,
-                                  model: String, thinking: [String: Any]?) async throws -> [String] {
+                                  model: String, thinking: [String: Any]?) async throws -> Translation {
         let languageName = Locale(identifier: "en").localizedString(forIdentifier: language) ?? language
         let numbered = texts.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
         let prompt = """
@@ -280,12 +304,15 @@ enum LyricsTranslator {
             struct Content: Decodable { let parts: [Part]? }
             struct Part: Decodable { let text: String? }
             let candidates: [Candidate]?
+            /// 実際に使われたモデル（別名で頼んだときも、実際のモデル名が入る）
+            let modelVersion: String?
         }
         let reply = try? JSONDecoder().decode(Reply.self, from: data)
         let text = reply?.candidates?.first?.content?.parts?.compactMap(\.text).joined() ?? ""
         guard let json = text.data(using: .utf8),
               let lines = try? JSONDecoder().decode([String].self, from: json),
               lines.count == texts.count else { throw TranslationError.badResponse }
-        return lines.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return Translation(lines: lines.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
+                           model: reply?.modelVersion ?? model)
     }
 }

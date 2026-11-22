@@ -69,11 +69,13 @@ actor LyricsDiskCache {
 
     private struct TranslationEntry: Codable {
         var lines: [String]
+        /// 訳したモデル（以前に保存したものには入っていない）
+        var model: String?
         var savedAt: Date
     }
 
     /// 保存してある翻訳（歌詞の行と同じ順番）。なければ、または期限切れなら nil
-    func loadTranslation(_ key: String) -> [String]? {
+    func loadTranslation(_ key: String) -> (lines: [String], model: String?)? {
         let url = translationURL(for: key)
         guard let data = try? Data(contentsOf: url),
               let entry = try? JSONDecoder().decode(TranslationEntry.self, from: data) else { return nil }
@@ -81,11 +83,12 @@ actor LyricsDiskCache {
             try? FileManager.default.removeItem(at: url)
             return nil
         }
-        return entry.lines
+        return (entry.lines, entry.model)
     }
 
-    func saveTranslation(_ key: String, lines: [String]) {
-        guard let data = try? JSONEncoder().encode(TranslationEntry(lines: lines, savedAt: Date())) else { return }
+    func saveTranslation(_ key: String, lines: [String], model: String) {
+        guard let data = try? JSONEncoder().encode(TranslationEntry(lines: lines, model: model, savedAt: Date()))
+        else { return }
         let url = translationURL(for: key)
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: url, options: .atomic)

@@ -443,7 +443,8 @@ final class LyricsStore {
     enum TranslationStatus: Equatable {
         case none
         case translating
-        case translated(language: String)
+        /// model：訳したモデル（以前に保存した翻訳では分からないので nil）
+        case translated(language: String, model: String?)
         case failed(String)
     }
     private(set) var translationStatus: TranslationStatus = .none
@@ -572,7 +573,7 @@ final class LyricsStore {
 
         untranslatedLines = lines
         // 歌詞の本文も鍵に含める（歌詞が取り直されて変わったら訳し直す）
-        let cacheKey = "v1|\(language)|\(key)|\(texts.joined(separator: "\n"))"
+        let cacheKey = "v2|\(language)|\(key)|\(texts.joined(separator: "\n"))"
         translationTask = Task { [weak self] in
             var translated = await LyricsDiskCache.shared.loadTranslation(cacheKey)
             if translated == nil {
@@ -580,8 +581,8 @@ final class LyricsStore {
                 self.translationStatus = .translating
                 do {
                     let result = try await LyricsTranslator.translate(texts, to: language, apiKey: apiKey)
-                    await LyricsDiskCache.shared.saveTranslation(cacheKey, lines: result)
-                    translated = result
+                    await LyricsDiskCache.shared.saveTranslation(cacheKey, lines: result.lines, model: result.model)
+                    translated = (result.lines, result.model)
                 } catch is CancellationError {
                     return
                 } catch {
@@ -592,7 +593,7 @@ final class LyricsStore {
             }
             guard let self, !Task.isCancelled, self.currentKey == key, let translated else { return }
             var byID: [Int: String] = [:]
-            for (line, text) in zip(targets, translated) where !text.isEmpty && text != line.text {
+            for (line, text) in zip(targets, translated.lines) where !text.isEmpty && text != line.text {
                 byID[line.id] = text
             }
             self.state = .synced(lines.map { line in
@@ -600,7 +601,7 @@ final class LyricsStore {
                 line.translation = byID[line.id]
                 return line
             })
-            self.translationStatus = .translated(language: language)
+            self.translationStatus = .translated(language: language, model: translated.model)
         }
     }
 
