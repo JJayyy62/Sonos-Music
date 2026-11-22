@@ -29,7 +29,7 @@ struct CatalogTrack: Identifiable, Hashable, Sendable {
     var explicit = false
 
     var id: String { "\(service.rawValue)-\(serviceID)" }
-    var content: ServiceContent { .song(service, id: serviceID, title: title, albumID: albumID) }
+    var content: ServiceContent { .song(service, id: serviceID, title: title) }
 }
 
 struct CatalogArtist: Identifiable, Hashable, Sendable {

@@ -23,7 +23,6 @@ struct HomeView: View {
         var list: [StreamingService] = []
         if !music.isAuthorized { list.append(.appleMusic) }
         if !spotify.isConnected { list.append(.spotify) }
-        list.append(.amazonMusic)
         return list
     }
 
@@ -142,7 +141,6 @@ struct HomeView: View {
         switch service {
         case .appleMusic: return !music.isAuthorized
         case .spotify: return !spotify.isConnected
-        case .amazonMusic: return true
         }
     }
 

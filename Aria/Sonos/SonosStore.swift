@@ -809,7 +809,7 @@ final class SonosStore {
         enqueue(content.serviceContent, mode: mode)
     }
 
-    /// Apple Music / Spotify / Amazon Music の曲・アルバム・プレイリストを、Sonosに登録済みのアカウントで再生する
+    /// Apple Music / Spotify の曲・アルバム・プレイリストを、Sonosに登録済みのアカウントで再生する
     func play(_ content: ServiceContent, startIndex: Int = 0, shuffle: Bool? = nil) {
         if content.service == .spotify {
             playSpotify(content)

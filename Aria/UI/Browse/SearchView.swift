@@ -3,7 +3,7 @@ import SwiftUI
 
 struct SearchView: View {
     enum Scope: String, CaseIterable, Identifiable {
-        case appleMusic, spotify, amazonMusic, library
+        case appleMusic, spotify, library
         var id: String { rawValue }
 
         var service: StreamingService? { StreamingService(rawValue: rawValue) }
@@ -41,7 +41,6 @@ struct SearchView: View {
             switch scope {
             case .appleMusic: appleMusicResults
             case .spotify: spotifyResultList
-            case .amazonMusic: amazonResults
             case .library: libraryResultList
             }
         }
@@ -107,8 +106,6 @@ struct SearchView: View {
                 } catch {
                     if !Task.isCancelled { store.show(error) }
                 }
-            case .amazonMusic:
-                break
             case .library:
                 await searchLibrary(term)
             }
@@ -117,7 +114,6 @@ struct SearchView: View {
 
     private var prompt: String {
         switch scope {
-        case .amazonMusic: return "お気に入りを絞り込む"
         case .library: return "ライブラリのアーティスト、曲、アルバム"
         default: return "\(scope.title)のアーティスト、曲、アルバムなど"
         }
@@ -178,29 +174,6 @@ struct SearchView: View {
             TrackRow(title: collection.title, subtitle: collection.subtitle, artworkURL: collection.artworkURL)
         }
         .contextMenu { EnqueueMenu(content: collection.content) }
-    }
-
-    // MARK: Amazon Music
-
-    @ViewBuilder
-    private var amazonResults: some View {
-        ServiceConnectCard(service: .amazonMusic)
-            .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
-        let term = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let favorites = store.favorites(for: .amazonMusic)
-            .filter { term.isEmpty || $0.title.lowercased().contains(term) }
-        if !favorites.isEmpty {
-            Section("Sonosのお気に入り") {
-                ForEach(favorites) { favorite in
-                    Button { store.playFavorite(favorite) } label: {
-                        TrackRow(title: favorite.title, subtitle: favorite.serviceDescription,
-                                 artworkURL: favorite.artworkURL(host: store.artworkHost))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
     }
 
     // MARK: Apple Music

@@ -7,7 +7,6 @@ import SwiftUI
 enum StreamingService: String, CaseIterable, Identifiable, Codable, Sendable {
     case appleMusic
     case spotify
-    case amazonMusic
 
     var id: String { rawValue }
 
@@ -15,7 +14,6 @@ enum StreamingService: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .appleMusic: return "Apple Music"
         case .spotify: return "Spotify"
-        case .amazonMusic: return "Amazon Music"
         }
     }
 
@@ -27,7 +25,6 @@ enum StreamingService: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .appleMusic: return 204
         case .spotify: return 12
-        case .amazonMusic: return 201
         }
     }
 
@@ -42,12 +39,8 @@ enum StreamingService: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .appleMusic: return Color(red: 0.99, green: 0.36, blue: 0.45)
         case .spotify: return Color(red: 0.27, green: 0.86, blue: 0.47)
-        case .amazonMusic: return Color(red: 0.25, green: 0.78, blue: 0.95)
         }
     }
-
-    /// アプリ内でカタログを検索できるか
-    var hasCatalogSearch: Bool { self != .amazonMusic }
 
     // MARK: Detection
 
@@ -99,13 +92,12 @@ struct ServiceContent: Hashable, Sendable {
 
     var service: StreamingService
     var kind: Kind
-    /// サービス上のID（Amazon の曲は "曲ASIN" と "アルバムASIN" を `albumID` に分けて持つ）
+    /// サービス上のID
     var id: String
     var title: String
-    var albumID: String?
 
-    static func song(_ service: StreamingService, id: String, title: String, albumID: String? = nil) -> ServiceContent {
-        ServiceContent(service: service, kind: .track, id: id, title: title, albumID: albumID)
+    static func song(_ service: StreamingService, id: String, title: String) -> ServiceContent {
+        ServiceContent(service: service, kind: .track, id: id, title: title)
     }
     static func album(_ service: StreamingService, id: String, title: String) -> ServiceContent {
         ServiceContent(service: service, kind: .album, id: id, title: title)
@@ -123,7 +115,6 @@ enum SonosServiceURI {
         switch content.service {
         case .appleMusic: return appleMusic(content, account)
         case .spotify: return spotify(content, account)
-        case .amazonMusic: return amazon(content, account)
         }
     }
 
@@ -190,35 +181,6 @@ enum SonosServiceURI {
                      meta("0006206c\(encoded)", parent: "", content, playlistClass, account))]
         }
     }
-
-    // MARK: Amazon Music（sid 201）
-
-    private static func amazon(_ content: ServiceContent, _ account: ServiceAccount) -> [Candidate] {
-        let sid = StreamingService.amazonMusic.sonosServiceID
-        switch content.kind {
-        case .track:
-            var path = "catalog%2ftracks%2f\(content.id)%2f"
-            if let albumID = content.albumID { path += "%3falbumAsin%3d\(albumID)" }
-            return [
-                ("x-sonosapi-hls-static:\(path)?sid=\(sid)&flags=0&sn=\(account.serial)",
-                 meta("10030000\(path)", parent: "", content, trackClass, account)),
-                ("x-sonos-http:\(path)?sid=\(sid)&flags=8224&sn=\(account.serial)",
-                 meta("10032020\(path)", parent: "", content, trackClass, account)),
-            ]
-        case .album:
-            let path = "catalog%2falbums%2f\(content.id)%2f%23album_desc"
-            return ["1004206c", "0004206c"].map { prefix in
-                ("x-rincon-cpcontainer:\(prefix)\(path)?sid=\(sid)&flags=8300&sn=\(account.serial)",
-                 meta("\(prefix)\(path)", parent: "", content, albumClass, account))
-            }
-        case .playlist:
-            let path = "catalog%2fplaylists%2f\(content.id)%2f%23playlist_desc"
-            return ["1006206c", "0006206c"].map { prefix in
-                ("x-rincon-cpcontainer:\(prefix)\(path)?sid=\(sid)&flags=8300&sn=\(account.serial)",
-                 meta("\(prefix)\(path)", parent: "", content, playlistClass, account))
-            }
-        }
-    }
 }
 
 // MARK: - Share links
@@ -250,22 +212,6 @@ enum ServiceLink {
             }
             if parts.contains("album"), let id = parts.last { return .album(.appleMusic, id: id, title: "Apple Music") }
             if parts.contains("playlist"), let id = parts.last { return .playlist(.appleMusic, id: id, title: "Apple Music") }
-        } else if host.contains("amazon.") {
-            // https://music.amazon.co.jp/albums/{albumASIN}?trackAsin={trackASIN}
-            if let albumIndex = parts.firstIndex(of: "albums"), parts.indices.contains(albumIndex + 1) {
-                let album = parts[albumIndex + 1]
-                if let track = value("trackAsin") ?? value("trackasin") {
-                    return .song(.amazonMusic, id: track, title: "Amazon Music", albumID: album)
-                }
-                return .album(.amazonMusic, id: album, title: "Amazon Music")
-            }
-            if let index = parts.firstIndex(where: { $0 == "playlists" || $0 == "user-playlists" }),
-               parts.indices.contains(index + 1) {
-                return .playlist(.amazonMusic, id: parts[index + 1], title: "Amazon Music")
-            }
-            if let index = parts.firstIndex(of: "tracks"), parts.indices.contains(index + 1) {
-                return .song(.amazonMusic, id: parts[index + 1], title: "Amazon Music")
-            }
         }
         return nil
     }

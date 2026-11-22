@@ -14,8 +14,6 @@ enum CatalogLoader {
                 return try await AppleMusicService.shared.libraryPlaylistTracks(collection.serviceID)
             default: return []
             }
-        case .amazonMusic:
-            return []
         }
     }
 
@@ -23,7 +21,6 @@ enum CatalogLoader {
         switch artist.service {
         case .spotify: return try await SpotifyService.shared.artistAlbums(artist)
         case .appleMusic: return try await ITunesCatalog.artistAlbums(artist.serviceID)
-        case .amazonMusic: return []
         }
     }
 
@@ -31,7 +28,6 @@ enum CatalogLoader {
         switch artist.service {
         case .spotify: return await SpotifyService.shared.artistTopTracks(artist)
         case .appleMusic: return await ITunesCatalog.artistSongs(artist.serviceID)
-        case .amazonMusic: return []
         }
     }
 }

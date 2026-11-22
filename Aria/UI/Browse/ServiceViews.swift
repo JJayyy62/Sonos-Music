@@ -60,7 +60,7 @@ struct ChipBar<Value: Hashable>: View {
 }
 
 extension ChipBar where Value == StreamingService? {
-    /// 「すべて / Apple Music / Spotify / Amazon Music」
+    /// 「すべて / Apple Music / Spotify」
     static func services(selection: Binding<StreamingService?>) -> ChipBar {
         ChipBar(items: [Item(value: nil, title: "すべて", tint: Theme.accent)]
                 + StreamingService.allCases.map { Item(value: $0, title: $0.displayName, tint: $0.tint) },
@@ -266,8 +266,6 @@ struct ServiceConnectCard: View {
                 case .spotify:
                     SpotifyLoginButton()
                     CardButton(title: "リンクから再生", symbol: "link", tint: nil) { showLink = true }
-                case .amazonMusic:
-                    CardButton(title: "リンクから再生", symbol: "link", tint: service.tint) { showLink = true }
                 }
             }
             .padding(.top, 2)
@@ -289,7 +287,6 @@ struct ServiceConnectCard: View {
         switch service {
         case .appleMusic: return "Apple Musicと連携"
         case .spotify: return spotify.clientID.isEmpty ? "Spotifyを設定" : "Spotifyにログイン"
-        case .amazonMusic: return "Amazon Musicを再生"
         }
     }
 
@@ -301,8 +298,6 @@ struct ServiceConnectCard: View {
             return spotify.clientID.isEmpty
                 ? "Spotifyの検索・プレイリストの表示には、設定 > 音楽サービス > Spotify で Client ID の登録が必要です。共有リンクからの再生は Client ID なしで使えます（最初に1回、SonosアプリでSpotifyの曲をお気に入りに追加しておいてください）。"
                 : "ログインすると、Spotifyの検索・保存したアルバム・プレイリストを表示できます。再生はSonosに登録済みのSpotifyアカウントで行われます。"
-        case .amazonMusic:
-            return "Amazon Musicには公開された検索APIがないため、Amazon Musicアプリの「共有 > リンクをコピー」で得たリンクから再生します。最初に1回、SonosアプリでAmazon Musicの曲をお気に入りに追加しておいてください（アカウントを見分けるため。お気に入りはホームにも表示されます）。"
         }
     }
 }
@@ -365,7 +360,7 @@ struct SpotifyLoginButton: View {
 
 // MARK: - Link playback
 
-/// 共有リンク（Apple Music / Spotify / Amazon Music）を貼り付けて再生する
+/// 共有リンク（Apple Music / Spotify）を貼り付けて再生する
 struct LinkPlaySheet: View {
     @Environment(SonosStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -452,10 +447,9 @@ struct LinkPlaySheet: View {
 
     private var hint: String {
         switch parsed?.service ?? preferred {
-        case .amazonMusic: return "Amazon Musicアプリで曲・アルバム・プレイリストの「共有 > リンクをコピー」を選び、ここに貼り付けてください。"
         case .spotify: return "Spotifyアプリで「共有 > リンクをコピー」を選び、ここに貼り付けてください。"
         case .appleMusic: return "ミュージックアプリで「共有 > リンクをコピー」を選び、ここに貼り付けてください。"
-        default: return "Apple Music・Spotify・Amazon Music の共有リンクに対応しています。再生はSonosに登録済みの各サービスのアカウントで行われます。"
+        default: return "Apple Music・Spotify の共有リンクに対応しています。再生はSonosに登録済みの各サービスのアカウントで行われます。"
         }
     }
 

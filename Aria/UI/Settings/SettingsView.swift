@@ -205,7 +205,6 @@ struct SettingsView: View {
         switch service {
         case .appleMusic: return music.isAuthorized ? "連携済み" : "未連携"
         case .spotify: return spotify.isConnected ? "ログイン済み" : (spotify.clientID.isEmpty ? "未設定" : "未ログイン")
-        case .amazonMusic: return store.linkedServices.contains(.amazonMusic) ? "Sonosで検出" : "リンクで再生"
         }
     }
 
@@ -317,14 +316,6 @@ struct ServiceSettingsView: View {
                 Text("検索・ライブラリ（Spotify Web API）")
             } footer: {
                 Text("developer.spotify.com のダッシュボードでアプリを作成し、Redirect URI に上の値を登録して、表示された Client ID を入力してください。共有リンクからの再生は Client ID なしで使えますが、最初に1回だけ、純正のSonosアプリでSpotifyの曲を1つお気に入りに追加しておく必要があります（Sonos上のSpotifyアカウントを見分けるために使います）。")
-            }
-        case .amazonMusic:
-            Section {
-                Text("Amazon Musicには公開された検索APIがないため、アプリ内で検索はできません。Amazon Musicアプリの「共有 > リンクをコピー」で得たリンクから再生するか、Sonosのお気に入りに登録してください。")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            } header: {
-                Text("検索")
             }
         }
     }
