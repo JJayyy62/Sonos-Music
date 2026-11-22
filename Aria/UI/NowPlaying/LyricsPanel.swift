@@ -29,7 +29,17 @@ struct LyricsPanel: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { store.lyrics.retryTranslationIfFailed() }
+        .onAppear {
+            store.lyrics.retryTranslationIfFailed()
+            keepScreenOn(store.isPlaying)
+        }
+        // Apple Music と同じく、歌詞を表示して再生している間は画面を暗くしない（一時停止中は通常どおり暗くなる）
+        .onChange(of: store.isPlaying) { _, playing in keepScreenOn(playing) }
+        .onDisappear { keepScreenOn(false) }
+    }
+
+    private func keepScreenOn(_ on: Bool) {
+        UIApplication.shared.isIdleTimerDisabled = on
     }
 
     private func message(_ text: String, symbol: String) -> some View {
