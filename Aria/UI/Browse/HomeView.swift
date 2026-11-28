@@ -241,13 +241,58 @@ struct Shelf<Content: View>: View {
     }
 }
 
-/// Sonosのお気に入り
+/// Sonosのお気に入り。プレイリスト・アルバムは押すと開き（曲を選んで再生できる）、曲やラジオは押すと再生する
 struct FavoriteTile: View {
     @Environment(SonosStore.self) private var store
+    @Environment(SpotifyService.self) private var spotify
     let favorite: DIDLItem
 
     var body: some View {
-        Button { store.playFavorite(favorite) } label: {
+        if let collection = openableCollection {
+            NavigationLink { CatalogCollectionView(collection: collection) } label: { tile }
+                .buttonStyle(PressableStyle())
+                .contextMenu { menu }
+        } else {
+            Button { store.playFavorite(favorite) } label: { tile }
+                .buttonStyle(PressableStyle())
+                .contextMenu { menu }
+        }
+    }
+
+    /// 開いて曲の一覧を出せるお気に入り（Apple Music のプレイリスト・アルバム、Spotify にログイン済みならそのプレイリスト・アルバム）
+    private var openableCollection: CatalogCollection? {
+        guard let uri = favorite.resURI?.removingPercentEncoding, uri.hasPrefix("x-rincon-cpcontainer:") else { return nil }
+        let artwork = favorite.artworkURL(host: store.artworkHost)
+        func id(after marker: String) -> String? {
+            guard let range = uri.range(of: marker, options: .caseInsensitive) else { return nil }
+            let rest = uri[range.upperBound...]
+            let value = rest.prefix { $0 != "?" && $0 != "&" && $0 != "/" }
+            return value.isEmpty ? nil : String(value)
+        }
+        switch StreamingService.detect(favorite) {
+        case .appleMusic:
+            if let playlist = id(after: "libraryplaylist:") {
+                return CatalogCollection(service: .appleMusic, kind: .playlist, serviceID: playlist, title: favorite.title,
+                                         subtitle: "お気に入り", artworkURL: artwork)
+            }
+            if let album = id(after: "album:"), album.allSatisfy(\.isNumber) {
+                return CatalogCollection(service: .appleMusic, kind: .album, serviceID: album, title: favorite.title,
+                                         subtitle: "お気に入り", artworkURL: artwork)
+            }
+        case .spotify where spotify.isConnected:
+            for kind in [ServiceContent.Kind.playlist, .album] {
+                if let value = id(after: "spotify:\(kind.rawValue):") {
+                    return CatalogCollection(service: .spotify, kind: kind, serviceID: value, title: favorite.title,
+                                             subtitle: "お気に入り", artworkURL: artwork)
+                }
+            }
+        default:
+            break
+        }
+        return nil
+    }
+
+    private var tile: some View {
             VStack(alignment: .leading, spacing: 8) {
                 ArtworkView(url: favorite.artworkURL(host: store.artworkHost), cornerRadius: 10, seed: favorite.title)
                     .frame(width: 160, height: 160)
@@ -276,9 +321,10 @@ struct FavoriteTile: View {
                 }
             }
             .frame(width: 160, alignment: .leading)
-        }
-        .buttonStyle(PressableStyle())
-        .contextMenu {
+    }
+
+    @ViewBuilder
+    private var menu: some View {
             Button("再生", systemImage: "play.fill") { store.playFavorite(favorite) }
             if let uri = favorite.resURI, !SonosStore.isStreamURI(uri) {
                 Button("次に再生", systemImage: "text.line.first.and.arrowtriangle.forward") {
@@ -288,7 +334,6 @@ struct FavoriteTile: View {
                     store.enqueue(favorite, mode: .end)
                 }
             }
-        }
     }
 
     private var isCurrent: Bool {

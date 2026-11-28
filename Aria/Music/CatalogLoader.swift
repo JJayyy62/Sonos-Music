@@ -11,7 +11,14 @@ enum CatalogLoader {
             switch collection.kind {
             case .album: return try await ITunesCatalog.albumTracks(collection.serviceID)
             case .playlist where collection.serviceID.hasPrefix("p."):
-                return try await AppleMusicService.shared.libraryPlaylistTracks(collection.serviceID)
+                // Apple Music API（開発者トークンが必要）が使えなければ、端末のライブラリから読む
+                if AppleMusicService.shared.apiAvailable != false,
+                   let tracks = try? await AppleMusicService.shared.libraryPlaylistTracks(collection.serviceID),
+                   !tracks.isEmpty {
+                    return tracks
+                }
+                return try await AppleMusicService.shared.deviceLibraryPlaylistTracks(id: collection.serviceID,
+                                                                                      name: collection.title)
             default: return []
             }
         }

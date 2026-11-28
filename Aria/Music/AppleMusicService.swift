@@ -212,6 +212,30 @@ final class AppleMusicService {
         }
     }
 
+    /// 端末のミュージックライブラリにあるプレイリストの曲（開発者トークンがなくても読める）。
+    /// Sonos のお気に入りのプレイリスト（ID が p. で始まる）を開くときに使う。
+    /// ID で見つからなければ名前で探す（端末のライブラリでの ID が Apple Music の ID と違うことがあるため）
+    func deviceLibraryPlaylistTracks(id: String, name: String) async throws -> [CatalogTrack] {
+        guard isAuthorized else { return [] }
+        var byID = MusicLibraryRequest<Playlist>()
+        byID.filter(matching: \.id, equalTo: MusicItemID(id))
+        var playlist = try? await byID.response().items.first
+        if playlist == nil {
+            var byName = MusicLibraryRequest<Playlist>()
+            byName.filter(matching: \.name, equalTo: name)
+            playlist = try await byName.response().items.first
+        }
+        guard let playlist else { return [] }
+        let detailed = try await playlist.with([.tracks])
+        return (detailed.tracks ?? []).map { track in
+            // 端末のライブラリの画像は musickit:// の URL で、画像として読めないので使わない
+            let artwork = track.artwork?.url(width: 300, height: 300).flatMap { $0.scheme?.hasPrefix("http") == true ? $0 : nil }
+            return CatalogTrack(service: .appleMusic, serviceID: "", title: track.title, artist: track.artistName,
+                                album: track.albumTitle, albumID: nil, artworkURL: artwork,
+                                duration: track.duration, number: nil)
+        }
+    }
+
     /// ライブラリのプレイリストの曲（カタログIDのある曲だけ）
     func libraryPlaylistTracks(_ id: String) async throws -> [CatalogTrack] {
         guard let url = URL(string: "https://api.music.apple.com/v1/me/library/playlists/\(id)/tracks?limit=100") else { return [] }
