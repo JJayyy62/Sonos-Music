@@ -30,8 +30,9 @@ struct RootView: View {
     @State private var lyricsPreview = LyricsPreviewRequest.fromLaunchArguments
     #endif
 
-    /// ドックの高さ（スクロールの下端余白に使う）
-    static let dockClearance: CGFloat = 140
+    /// スクロールの下端に足す余白。ドック（ミニプレーヤー 60 + 間 8 + タブ 54 + 下の余白 4 = 126pt）が
+    /// 最後の項目に重ならないよう、少しゆとりを持たせる
+    static let dockClearance: CGFloat = 142
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -56,13 +57,19 @@ struct RootView: View {
         .fullScreenCover(item: $lyricsPreview) { LyricsPreviewView(request: $0) }
         #endif
         .sonosToast()
+        // つまみ（2本指の回転）で音量を変えている間は、指の下のボタンが押されないようにする
+        .disabled(KnobState.shared.isTurning)
         .background(RotationGestureInstaller())
         .task { store.start() }
     }
 
     private func page<Content: View>(_ target: Section, @ViewBuilder content: () -> Content) -> some View {
         NavigationStack { content() }
-            .safeAreaInset(edge: .bottom) { Color.clear.frame(height: Self.dockClearance) }
+            // NavigationStack の外側に safeAreaInset を付けても、中のスクロール（ホームなど）には届かず、
+            // 一番下の項目がドックの裏に隠れて触れなかった。スクロールの余白として指定すると、
+            // 開いた先の画面（プレイリストなど）を含め、中のすべてのスクロールに効く
+            .contentMargins(.bottom, Self.dockClearance, for: .scrollContent)
+            .contentMargins(.bottom, Self.dockClearance, for: .scrollIndicators)
             .opacity(section == target ? 1 : 0)
             .allowsHitTesting(section == target)
             .accessibilityHidden(section != target)
