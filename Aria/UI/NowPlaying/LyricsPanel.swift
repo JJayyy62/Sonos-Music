@@ -14,7 +14,7 @@ struct LyricsPanel: View {
             case .synced(let lines):
                 SyncedLyricsView(lines: lines)
             case .plain(let lines):
-                PlainLyricsView(lines: lines)
+                PlainLyricsView(lines: lines, source: store.lyrics.source)
             case .instrumental:
                 message("インストゥルメンタル", symbol: "music.note")
             case .notFound:
@@ -264,6 +264,7 @@ struct InterludeDots: View {
 
 struct PlainLyricsView: View {
     let lines: [String]
+    var source: LyricsSource?
 
     var body: some View {
         ScrollView(showsIndicators: false) {
@@ -277,6 +278,13 @@ struct PlainLyricsView: View {
                         .font(.system(size: 24, weight: .bold))
                         .foregroundStyle(.white.opacity(0.85))
                         .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                // 時間同期の歌詞と同じく、最後に取得元を出す
+                if let source {
+                    Text("歌詞提供: \(source.rawValue)")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.4))
+                        .padding(.top, 12)
                 }
                 Color.clear.frame(height: 120)
             }
