@@ -7,7 +7,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @AppStorage(RotationVolumeController.enabledKey) private var rotationEnabled = true
-    @AppStorage(RotationVolumeController.sensitivityKey) private var degreesPerStep = 3.5
+    @AppStorage(RotationVolumeController.sensitivityKey) private var degreesPerStep = RotationVolumeController.standardDegreesPerStep
     @Environment(SpotifyService.self) private var spotify
     @State private var manualHost = ""
     @State private var showLink = false
@@ -60,9 +60,9 @@ struct SettingsView: View {
                 Section {
                     Toggle("2本指の回転で音量を変更", isOn: $rotationEnabled)
                     Picker("感度", selection: $degreesPerStep) {
-                        Text("ゆっくり").tag(6.0)
-                        Text("標準").tag(3.5)
-                        Text("すばやく").tag(2.0)
+                        Text("ゆっくり").tag(4.0)
+                        Text("標準").tag(RotationVolumeController.standardDegreesPerStep)
+                        Text("すばやく").tag(1.5)
                     }
                     .disabled(!rotationEnabled)
                 } header: {
