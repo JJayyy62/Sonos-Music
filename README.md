@@ -24,13 +24,22 @@ UIはダークモードの Apple Music に近い黒基調で、基本色にや�
 
 ### 音源品質の判定方法
 
-純正Sonosアプリの再生画面には「Lossless」「Dolby Atmos」が表示されるので、スピーカーか音楽サービスのどこかにこの情報はあります。ただ、Aria が使っている従来の UPnP API（ポート 1400）では、いまのところ該当する項目を確認できていません（純正アプリはポート 1443 の新しい API を使っていると推測されますが、未調査です）。そのため現状は次の順で判定しています。
+純正 Sonos アプリと同じく、スピーカーが**実際に受け取っている音源の品質**を Sonos 自身から取得しています。従来の UPnP API（ポート 1400）にはこの情報がないため、純正アプリが使っている新しいローカル API（`https://<スピーカー>:1443/api/v1`）を使います。
+
+- 取得先: `GET /groups/{groupId}/playbackMetadata` の `currentItem.track.quality`（`groupId` は `GET /players/local/info` で取得）
+- 返ってくる項目: `bitDepth`（ビット深度）、`sampleRate`（サンプルレート）、`lossless`（ロスレスか）、`immersive`（Dolby Atmos などの空間オーディオか）
+  - 例（Apple Music のロスレス曲）: `{"bitDepth": 24, "sampleRate": 48000, "lossless": true, "immersive": false}`
+- ヘッダー `X-Sonos-Api-Key` に Sonos がローカル連携向けに公開しているキーを付けます。スピーカーは自己署名の証明書を使うので、接続先がローカルネットワークのアドレスのときだけ証明書を受け入れます
+- 曲の再生開始直後はロスレス（ステレオ）で届き、少し遅れて Dolby Atmos に切り替わることがあるため、曲の開始から 0・1・2・3・5・7 秒後に確認し、その後も約 3 秒ごとに確認しています
+
+判定の順番は次のとおりです。
 
 1. **テレビ（HDMI / 光）入力**: サウンドバーの `HTAudioIn` から Dolby Atmos / Dolby Digital Plus / マルチチャンネル PCM などを判定（実際の入力形式です）
-2. **Sonosが受信しているストリームの情報**: トラックの `protocolInfo`（MIMEタイプ）、ビット深度、サンプルレート、チャンネル数、URI から FLAC / ALAC などのロスレスやハイレゾを判定
-3. **Apple Musicのカタログ情報**: 再生中の曲が Apple Music の場合、Apple Music API の `audioTraits` からその曲が対応する形式（Dolby Atmos / Lossless / Hi-Res Lossless）を取得。スピーカーが Dolby Atmos に対応しているか（Arc / Arc Ultra / Era 300 / Beam 第2世代）も考慮します
+2. **Sonos が報告する品質（上記の新しい API）**: `immersive` が true なら Dolby Atmos、`lossless` が true ならロスレス（48kHz を超えればハイレゾロスレス）。詳細画面にはビット深度とサンプルレートも表示します
+3. **Sonos が受信しているストリームの情報**: 上記で分からないとき、トラックの `protocolInfo`（MIME タイプ）、ビット深度、サンプルレート、チャンネル数、URI から FLAC / ALAC などのロスレスやハイレゾを判定
+4. **Apple Music のカタログ情報**: それでも分からない Apple Music の曲は、Apple Music API の `audioTraits` からその曲が対応する形式（Dolby Atmos / Lossless / Hi-Res Lossless）を取得。スピーカーが Dolby Atmos に対応しているか（Arc / Arc Ultra / Era 300 / Beam 第2世代）も考慮します
 
-3のカタログ由来のバッジは右上に小さな点が付き、詳細画面に「Sonosが実際に受信している形式とは異なる場合があります」と表示されます。
+4 のカタログ由来のバッジは右上に小さな点が付き、詳細画面に「Sonosが実際に受信している形式とは異なる場合があります」と表示されます。
 
 ## 動作環境
 
