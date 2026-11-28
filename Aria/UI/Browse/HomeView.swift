@@ -275,6 +275,11 @@ struct FavoriteTile: View {
                 return CatalogCollection(service: .appleMusic, kind: .playlist, serviceID: playlist, title: favorite.title,
                                          subtitle: "お気に入り", artworkURL: artwork)
             }
+            // ライブラリに追加したアルバム（ID が l. で始まる）
+            if let album = id(after: "libraryalbum:") {
+                return CatalogCollection(service: .appleMusic, kind: .album, serviceID: album, title: favorite.title,
+                                         subtitle: "お気に入り", artworkURL: artwork)
+            }
             if let album = id(after: "album:"), album.allSatisfy(\.isNumber) {
                 return CatalogCollection(service: .appleMusic, kind: .album, serviceID: album, title: favorite.title,
                                          subtitle: "お気に入り", artworkURL: artwork)

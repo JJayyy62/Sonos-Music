@@ -137,8 +137,10 @@ enum SonosServiceURI {
             return [("x-sonos-http:\(encoded).mp4?sid=\(sid)&flags=8224&sn=\(account.serial)",
                      meta("10032020\(encoded)", parent: "1004206calbum%3a", content, trackClass, account))]
         case .album:
+            // カタログのアルバム（数字の ID）と、自分のライブラリのアルバム（l.）で ID の形が違う
+            let path = content.id.hasPrefix("l.") ? "libraryalbum%3a" : "album%3a"
             return ["1004206c", "0004206c"].flatMap { prefix -> [Candidate] in
-                let objectID = "\(prefix)album%3a\(content.id)"
+                let objectID = "\(prefix)\(path)\(content.id)"
                 let metadata = meta(objectID, parent: "00020000album%3a", content, albumClass, account)
                 return [("x-rincon-cpcontainer:\(objectID)?sid=\(sid)&flags=8300&sn=\(account.serial)", metadata),
                         ("x-rincon-cpcontainer:\(objectID)", metadata)]

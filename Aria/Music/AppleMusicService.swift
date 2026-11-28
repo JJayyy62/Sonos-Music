@@ -236,6 +236,27 @@ final class AppleMusicService {
         }
     }
 
+    /// 端末のミュージックライブラリにあるアルバムの曲（ID が l. で始まるライブラリのアルバム）。
+    /// ID で見つからなければアルバム名で探す
+    func deviceLibraryAlbumTracks(id: String, name: String) async throws -> [CatalogTrack] {
+        guard isAuthorized else { return [] }
+        var byID = MusicLibraryRequest<Album>()
+        byID.filter(matching: \.id, equalTo: MusicItemID(id))
+        var album = try? await byID.response().items.first
+        if album == nil {
+            var byName = MusicLibraryRequest<Album>()
+            byName.filter(matching: \.title, equalTo: name)
+            album = try await byName.response().items.first
+        }
+        guard let album else { return [] }
+        let detailed = try await album.with([.tracks])
+        return (detailed.tracks ?? []).enumerated().map { index, track in
+            CatalogTrack(service: .appleMusic, serviceID: "", title: track.title, artist: track.artistName,
+                         album: track.albumTitle, albumID: nil, artworkURL: nil,
+                         duration: track.duration, number: track.trackNumber ?? index + 1)
+        }
+    }
+
     /// ライブラリのプレイリストの曲（カタログIDのある曲だけ）
     func libraryPlaylistTracks(_ id: String) async throws -> [CatalogTrack] {
         guard let url = URL(string: "https://api.music.apple.com/v1/me/library/playlists/\(id)/tracks?limit=100") else { return [] }

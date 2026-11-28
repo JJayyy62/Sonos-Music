@@ -9,6 +9,10 @@ enum CatalogLoader {
             return try await SpotifyService.shared.tracks(of: collection)
         case .appleMusic:
             switch collection.kind {
+            case .album where collection.serviceID.hasPrefix("l."):
+                // ライブラリのアルバムは、端末のミュージックライブラリから読む
+                return try await AppleMusicService.shared.deviceLibraryAlbumTracks(id: collection.serviceID,
+                                                                                   name: collection.title)
             case .album: return try await ITunesCatalog.albumTracks(collection.serviceID)
             case .playlist where collection.serviceID.hasPrefix("p."):
                 // Apple Music API（開発者トークンが必要）が使えなければ、端末のライブラリから読む
