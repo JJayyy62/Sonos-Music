@@ -59,14 +59,29 @@ struct SyncedLyricsView: View {
     var body: some View {
         // 単語単位の歌詞は滑らかに光らせるため更新頻度を上げる
         let wordSynced = lines.contains { $0.isWordSynced }
-        TimelineView(.animation(minimumInterval: wordSynced ? 1.0 / 30 : 0.1, paused: !store.isPlaying)) { context in
-            let time = store.position(at: context.date) + store.lyrics.timingOffset
+        TimelineView(.animation(minimumInterval: wordSynced ? 1.0 / 60 : 0.1, paused: !isRunning)) { context in
+            let time = position(at: context.date) + store.lyrics.timingOffset
             LyricsScroller(lines: lines, activeIndex: LyricLine.activeIndex(in: lines, at: time), time: time,
                            source: store.lyrics.source,
                            translationStatus: store.lyrics.translationStatus) { line in
                 store.seek(to: max(0, line.time - store.lyrics.timingOffset))
             }
         }
+    }
+
+    private var isRunning: Bool {
+        #if DEBUG
+        if LyricsPreviewRequest.clockStart != nil { return true }
+        #endif
+        return store.isPlaying
+    }
+
+    private func position(at date: Date) -> Double {
+        #if DEBUG
+        // 開発用の歌詞の確認画面では、スピーカーの代わりに端末の時計で進める
+        if let start = LyricsPreviewRequest.clockStart { return date.timeIntervalSince(start) }
+        #endif
+        return store.position(at: date)
     }
 }
 
@@ -196,12 +211,12 @@ struct LyricLineView: View {
             } else {
                 VStack(alignment: alignment, spacing: 6) {
                     if !line.text.isEmpty {
-                        lyricText(words: line.words, plain: line.text, baseOpacity: 1)
-                            .font(.system(size: 30, weight: .bold))
+                        lyricView(words: line.words, plain: line.text, baseOpacity: 1,
+                                  font: .system(size: 30, weight: .bold))
                     }
                     if !line.backgroundText.isEmpty {
-                        lyricText(words: line.background, plain: line.backgroundText, baseOpacity: 0.75)
-                            .font(.system(size: 21, weight: .semibold))
+                        lyricView(words: line.background, plain: line.backgroundText, baseOpacity: 0.75,
+                                  font: .system(size: 21, weight: .semibold))
                     }
                     // Apple Music と同じく、翻訳は原文の下に小さく、少し控えめな色で出す（単語ごとには光らせない）
                     if let translation = line.translation, !translation.isEmpty {
@@ -226,19 +241,95 @@ struct LyricLineView: View {
         .animation(.easeOut(duration: 0.25), value: unblurred)
     }
 
-    /// 単語単位の歌詞は、歌われた部分から順に明るくなる（カラオケ風）
-    private func lyricText(words: [LyricWord], plain: String, baseOpacity: Double) -> Text {
-        guard isActive else {
-            return Text(plain).foregroundStyle(Color.white.opacity(dimmed * baseOpacity))
+    /// 歌っている行の単語単位の歌詞は、Apple Music のカラオケのように、色が文字の上を途切れなく流れていく
+    /// （KaraokeRenderer で描く）。それ以外の行は普通の文字で出す
+    @ViewBuilder
+    private func lyricView(words: [LyricWord], plain: String, baseOpacity: Double, font: Font) -> some View {
+        if isActive, let time, !words.isEmpty {
+            // 文字列への埋め込み（Text("\\(a)\\(b)")）でつなぐと単語ごとの属性が消えるので、+ でつなぐ
+            words.dropFirst().reduce(karaokeSegment(words[0])) { $0 + karaokeSegment($1) }
+            .font(font)
+            .foregroundStyle(Theme.accent.opacity(baseOpacity))
+            .textRenderer(KaraokeRenderer(time: time))
+        } else if isActive {
+            Text(plain).font(font).foregroundStyle(Theme.accent.opacity(baseOpacity))
+        } else {
+            Text(plain).font(font).foregroundStyle(Color.white.opacity(dimmed * baseOpacity))
         }
-        guard let time, !words.isEmpty else {
-            return Text(plain).foregroundStyle(Theme.accent.opacity(baseOpacity))
-        }
-        return words.reduce(Text(verbatim: "")) { result, word in
-            let progress = word.progress(at: time)
-            let opacity = (0.35 + 0.65 * progress) * baseOpacity
-            let segment = Text(verbatim: word.text).foregroundStyle(Theme.accent.opacity(opacity))
-            return Text("\(result)\(segment)")
+    }
+}
+
+private func karaokeSegment(_ word: LyricWord) -> Text {
+    Text(verbatim: word.text).customAttribute(KaraokeWord(start: word.start, end: word.end))
+}
+
+/// 単語の歌う時間（KaraokeRenderer が塗る位置を決めるのに使う）
+struct KaraokeWord: TextAttribute {
+    var start: Double
+    var end: Double
+
+    func progress(at time: Double) -> Double {
+        guard end > start else { return time >= start ? 1 : 0 }
+        return min(1, max(0, (time - start) / (end - start)))
+    }
+}
+
+/// Apple Music のカラオケ風の描き方。
+/// 単語ごとに、まだ歌っていない部分を薄く描き、その上に明るい色を「左から右へ進む、端のぼやけたマスク」越しに重ねる。
+/// マスクの位置は時間に合わせてピクセル単位で動くので、文字単位で切り替わるより途切れなく塗りが進んで見える。
+/// 歌い始めた単語は少しだけ浮き上がる
+struct KaraokeRenderer: TextRenderer {
+    var time: Double
+    /// まだ歌っていない部分の明るさ。Apple Music では歌う前の文字もかなり明るく（歌った文字の 7 割ほど）、
+    /// 塗りとの差は控えめ
+    var unsungOpacity: Double = 0.6
+
+    /// 浮き上がる高さ（pt）と、浮き上がるのにかける時間（秒）。
+    /// Apple Music の画面録画をコマ送りで測ると、単語は歌われる少し前から浮き始め、約 1 秒かけて 2pt ほど上がる
+    private static let liftHeight: CGFloat = 2
+    private static let liftDuration: Double = 1.0
+    /// 歌い始めの何秒前から浮き始めるか
+    private static let liftLead: Double = 0.3
+
+    /// 歌い始めてからの時間に対する浮き上がりの高さ（なめらかな S 字の曲線）
+    static func lift(sinceStart elapsed: Double) -> CGFloat {
+        let t = min(1, max(0, (elapsed + liftLead) / liftDuration))
+        let eased = t * t * t * (t * (t * 6 - 15) + 10)
+        return liftHeight * CGFloat(eased)
+    }
+
+    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        for line in layout {
+            for run in line {
+                guard let word = run[KaraokeWord.self] else {
+                    context.draw(run)
+                    continue
+                }
+                let progress = word.progress(at: time)
+                let bounds = run.typographicBounds.rect
+                var wordContext = context
+                // 歌い始めると、単語の長さにかかわらず一定の時間をかけて、ゆっくり加速してゆっくり止まるように浮き上がる。
+                // 浮いたまま戻さない（短い単語で上下が続くと、跳ねているように見えるため）
+                wordContext.translateBy(x: 0, y: -Self.lift(sinceStart: time - word.start))
+
+                var unsung = wordContext
+                unsung.opacity = unsungOpacity
+                unsung.draw(run)
+
+                guard progress > 0 else { continue }
+                var sung = wordContext
+                // 塗りの先端をぼかす幅（短い単語では単語の幅に合わせて狭くする）
+                let feather = min(max(bounds.width * 0.35, 6), 18)
+                let edge = bounds.minX - feather + (bounds.width + feather) * progress
+                let maskRect = bounds.insetBy(dx: -2, dy: -bounds.height * 0.4)
+                sung.clipToLayer { mask in
+                    mask.fill(Path(maskRect), with: .linearGradient(
+                        Gradient(stops: [.init(color: .white, location: 0), .init(color: .clear, location: 1)]),
+                        startPoint: CGPoint(x: edge, y: 0),
+                        endPoint: CGPoint(x: edge + feather, y: 0)))
+                }
+                sung.draw(run)
+            }
         }
     }
 }
