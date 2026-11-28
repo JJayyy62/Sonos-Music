@@ -379,9 +379,7 @@ final class SonosStore {
         guard track.kind == .track, StreamingService.detect(in: track.uri) != nil else { return }
         let identity = track.identity
         Task {
-            let match = await TrackNameLocalizer.shared.match(
-                title: track.title, artist: track.artist, album: track.album, duration: track.duration,
-                catalogSongID: AppleMusicSonos.catalogSongID(in: track.uri))
+            let match = await Self.lookUpRetrying(track) { self.track?.identity == identity }
             guard let url = match?.artworkURL, self.track?.identity == identity else { return }
             // 画像を先に読み込んでから差し替え、読み込み中に表示が消えないようにする
             _ = await ImageLoader.shared.image(for: url)
@@ -408,16 +406,33 @@ final class SonosStore {
         }
     }
 
+    /// カタログで曲を探す。回数制限などで調べられなかったときは、その曲を再生している間、少し待って調べ直す
+    private static func lookUpRetrying(_ track: TrackInfo,
+                                       stillCurrent: @escaping @MainActor () -> Bool) async -> TrackNameLocalizer.CatalogMatch? {
+        let songID = AppleMusicSonos.catalogSongID(in: track.uri)
+        for attempt in 0..<6 {
+            if attempt > 0 { try? await Task.sleep(for: .seconds(15)) }
+            guard await stillCurrent() else { return nil }
+            if let match = await TrackNameLocalizer.shared.match(
+                title: track.title, artist: track.artist, album: track.album, duration: track.duration,
+                catalogSongID: songID) { return match }
+            guard await TrackNameLocalizer.shared.isPending(
+                title: track.title, artist: track.artist, album: track.album, duration: track.duration,
+                catalogSongID: songID) else { return nil }
+        }
+        return nil
+    }
+
     /// Apple Music の曲名がローマ字なら、カタログで日本語表記を探す
     private func localizeNames(_ track: TrackInfo) {
         guard track.kind == .track, StreamingService.detect(in: track.uri) == .appleMusic,
               TrackNameLocalizer.needsLookup(title: track.title, artist: track.artist) else { return }
         let identity = track.identity
         Task {
-            let names = await TrackNameLocalizer.shared.names(
-                title: track.title, artist: track.artist, album: track.album, duration: track.duration,
-                catalogSongID: AppleMusicSonos.catalogSongID(in: track.uri))
-            guard let names, self.track?.identity == identity else { return }
+            let match = await Self.lookUpRetrying(track) { self.track?.identity == identity }
+            guard let match, self.track?.identity == identity,
+                  match.title != track.title || match.artist != track.artist else { return }
+            let names = TrackNames(title: match.title, artist: match.artist, album: match.album ?? track.album)
             self.trackNames = names
             // ローマ字では歌詞が見つからなかった曲は、日本語表記でもう一度探す
             if case .notFound = self.lyrics.state {
@@ -566,6 +581,11 @@ final class SonosStore {
         }
     }
 
+    /// 必ず前の曲へ（再生位置にかかわらず。ミニプレーヤーのスワイプ用）
+    func previousTrack() {
+        run { try await $0.previous() }
+    }
+
     func seek(to seconds: Double) {
         guard duration > 0 else { return }
         let target = max(0, min(seconds, duration - 0.5))
@@ -575,10 +595,118 @@ final class SonosStore {
         run { try await $0.seek(to: target) }
     }
 
+    // MARK: - Shuffle
+
+    /// シャッフル中か。Sonos アプリなどで Sonos のシャッフルモードにされているときもオンと表示する
+    var isShuffleOn: Bool { playMode.shuffle || shuffleOriginal != nil }
+
+    /// Aria でシャッフルする前のキューの曲順（曲の URI）。シャッフルを解除するときに元の順へ戻すのに使う
+    private(set) var shuffleOriginal: [String]?
+    @ObservationIgnored private var shuffleOriginalKey: String?
+    @ObservationIgnored private var reorderingQueue = false
+
+    private var shuffleStorageKey: String? {
+        selectedGroup.map { "queueShuffleOriginal.\($0.coordinator.uuid)" }
+    }
+
+    private func saveShuffleOriginal(_ value: [String]?) {
+        shuffleOriginal = value
+        guard let key = shuffleStorageKey else { return }
+        shuffleOriginalKey = key
+        if let value { UserDefaults.standard.set(value, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
+    /// シャッフルのオン・オフ。
+    ///
+    /// Apple Music と同じように、オンにすると**キューの曲順そのもの**を並べ替える（いまの曲より後の曲だけ）。
+    /// Sonos のシャッフルモードは再生順を Sonos の中で決めるだけで、キューの一覧は元の順のまま返ってくるため、
+    /// 次に何が流れるかを表示できない。そこで Sonos のモードはシャッフルなしのまま、キューを並べ替える。
+    /// オフにすると、いまの曲より後の曲を元の順に戻す
     func toggleShuffle() {
-        var mode = playMode
-        mode.shuffle.toggle()
-        setPlayMode(mode)
+        guard !reorderingQueue else { return }
+        if playMode.shuffle {
+            // Sonos アプリなどでかけられた Sonos のシャッフルモードを解除する
+            var mode = playMode
+            mode.shuffle = false
+            setPlayMode(mode)
+        } else if shuffleOriginal != nil {
+            unshuffleQueue()
+        } else {
+            shuffleQueue(keeping: isPlayingQueue ? min(currentTrackNumber, queue.count) : 0,
+                         original: queue.map { $0.resURI ?? "" })
+        }
+    }
+
+    /// 先頭から `keeping` 曲はそのままにして、それより後ろの曲をランダムに並べ替える
+    private func shuffleQueue(keeping keep: Int, original: [String]) {
+        saveShuffleOriginal(original)
+        guard queue.count - keep > 1 else { return }
+        let order = Array(0..<keep) + Array(keep..<queue.count).shuffled()
+        applyQueueOrder(order)
+    }
+
+    /// いまの曲より後ろの曲を、シャッフル前の順に戻す
+    private func unshuffleQueue() {
+        guard let original = shuffleOriginal else { return }
+        saveShuffleOriginal(nil)
+        let keep = isPlayingQueue ? min(currentTrackNumber, queue.count) : 0
+        // 各曲のシャッフル前の位置（同じ曲が複数あっても、前から順に対応させる）
+        var positions: [String: [Int]] = [:]
+        for (index, uri) in original.enumerated() { positions[uri, default: []].append(index) }
+        let rank = queue.map { item -> Int in
+            let uri = item.resURI ?? ""
+            guard var list = positions[uri], !list.isEmpty else { return Int.max }
+            let first = list.removeFirst()
+            positions[uri] = list
+            return first
+        }
+        let tail = Array(keep..<queue.count).sorted { (rank[$0], $0) < (rank[$1], $1) }
+        applyQueueOrder(Array(0..<keep) + tail)
+    }
+
+    /// キューを `order`（いまのキューの位置の並び）の順に並べ替える。
+    /// Sonos には 1 曲ずつ動かす命令しかないので、前から順に、来るべき曲をその位置へ動かす。
+    /// 動かすのは並べ替える範囲の曲だけなので、再生中の曲の位置は変わらない
+    private func applyQueueOrder(_ order: [Int]) {
+        let snapshot = queue
+        guard order.count == snapshot.count, order != Array(snapshot.indices) else { return }
+        queue = order.map { snapshot[$0] }
+        reorderingQueue = true
+        run { client in
+            defer { self.reorderingQueue = false }
+            var current = Array(snapshot.indices)
+            for (target, wanted) in order.enumerated() {
+                guard let from = current.firstIndex(of: wanted), from != target else { continue }
+                try await client.reorderQueue(start: from + 1, count: 1, insertBefore: target + 1)
+                current.remove(at: from)
+                current.insert(wanted, at: target)
+            }
+            self.reorderingQueue = false
+            await self.refreshQueue()
+        }
+    }
+
+    /// キューの中身が変わったら、シャッフル前の曲順の記録を合わせる。
+    /// 曲が追加されただけなら記録にも足し、別のキューに置き換わっていたら記録を消す（シャッフルはオフになる）
+    private func reconcileShuffle(with items: [DIDLItem]) {
+        let key = shuffleStorageKey
+        if shuffleOriginalKey != key {
+            shuffleOriginalKey = key
+            shuffleOriginal = key.flatMap { UserDefaults.standard.stringArray(forKey: $0) }
+        }
+        guard let original = shuffleOriginal else { return }
+        var remaining: [String: Int] = [:]
+        for uri in original { remaining[uri, default: 0] += 1 }
+        var added: [String] = []
+        for item in items {
+            let uri = item.resURI ?? ""
+            if let count = remaining[uri], count > 0 { remaining[uri] = count - 1 } else { added.append(uri) }
+        }
+        if remaining.values.contains(where: { $0 > 0 }) || items.isEmpty {
+            saveShuffleOriginal(nil)
+        } else if !added.isEmpty {
+            saveShuffleOriginal(original + added)
+        }
     }
 
     func cycleRepeat() {
@@ -647,7 +775,7 @@ final class SonosStore {
     // MARK: - Queue
 
     func refreshQueue() async {
-        guard let client = coordinatorClient else { return }
+        guard let client = coordinatorClient, !reorderingQueue else { return }
         var items: [DIDLItem] = []
         var start = 0
         while start < 1000 {
@@ -656,7 +784,9 @@ final class SonosStore {
             start += result.items.count
             if result.items.isEmpty || start >= result.total { break }
         }
+        guard !reorderingQueue else { return }
         if items != queue { queue = items }
+        reconcileShuffle(with: items)
     }
 
     func playQueueItem(at index: Int) {
@@ -726,11 +856,27 @@ final class SonosStore {
             }
             if !added, let lastError { throw lastError }
             try await client.setAVTransportURI(queueURI, metadata: "")
-            if let shuffle {
+            // 新しいキューなので、前のシャッフルの記録は使わない
+            self.saveShuffleOriginal(nil)
+            if shuffle != nil, self.playMode.shuffle {
+                // シャッフルは Sonos のモードではなくキューの並べ替えで行う（toggleShuffle を参照）
                 var mode = self.playMode
-                mode.shuffle = shuffle
+                mode.shuffle = false
                 try await client.setPlayMode(mode.sonosValue)
                 self.playMode = mode
+            }
+            if shuffle == true {
+                // ランダムに選んだ 1 曲を先頭に動かしてすぐ再生し、残りの曲はそのあとで並べ替える
+                await self.refreshQueue()
+                let original = self.queue.map { $0.resURI ?? "" }
+                if self.queue.count > 1 {
+                    let first = Int.random(in: 0..<self.queue.count)
+                    if first > 0 { try await client.reorderQueue(start: first + 1, count: 1, insertBefore: 1) }
+                }
+                try await client.play()
+                await self.refreshQueue()
+                self.shuffleQueue(keeping: 1, original: original)
+                return
             }
             if startTrack > 1 { try await client.seek(trackNumber: startTrack) }
             try await client.play()

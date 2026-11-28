@@ -6,7 +6,7 @@ struct QueuePanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
-                ModeChip(symbol: "shuffle", isOn: store.playMode.shuffle) { store.toggleShuffle() }
+                ModeChip(symbol: "shuffle", isOn: store.isShuffleOn) { store.toggleShuffle() }
                 ModeChip(symbol: store.playMode.repeatMode == .one ? "repeat.1" : "repeat",
                          isOn: store.playMode.repeatMode != .off) { store.cycleRepeat() }
             }
@@ -185,8 +185,20 @@ private struct QueueRow: View {
         let uri = item.resURI ?? ""
         guard StreamingService.detect(in: uri) == .appleMusic,
               TrackNameLocalizer.needsLookup(title: item.title, artist: item.artist ?? "") else { return }
-        names = await TrackNameLocalizer.shared.names(
-            title: item.title, artist: item.artist ?? "", album: item.album,
-            duration: item.durationSeconds ?? 0, catalogSongID: AppleMusicSonos.catalogSongID(in: uri))
+        let artist = item.artist ?? ""
+        let duration = item.durationSeconds ?? 0
+        let songID = AppleMusicSonos.catalogSongID(in: uri)
+        // 回数制限で調べられなかったときは、少し待ってから調べ直す（行が見えている間だけ）
+        for attempt in 0..<6 {
+            if attempt > 0 { try? await Task.sleep(for: .seconds(15)) }
+            guard !Task.isCancelled else { return }
+            if let found = await TrackNameLocalizer.shared.names(title: item.title, artist: artist, album: item.album,
+                                                                  duration: duration, catalogSongID: songID) {
+                names = found
+                return
+            }
+            guard await TrackNameLocalizer.shared.isPending(title: item.title, artist: artist, album: item.album,
+                                                            duration: duration, catalogSongID: songID) else { return }
+        }
     }
 }

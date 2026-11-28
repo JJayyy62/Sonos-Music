@@ -143,8 +143,16 @@ struct MiniPlayer: View {
     @Environment(SonosStore.self) private var store
     let open: () -> Void
 
+    /// 左右にスワイプしている量（曲の表示だけを指に合わせて少し動かす）
+    @State private var dragOffset: CGFloat = 0
+    @State private var skipCount = 0
+
+    /// この距離を超えて離すと曲を切り替える
+    private let skipThreshold: CGFloat = 50
+
     var body: some View {
         HStack(spacing: 12) {
+            HStack(spacing: 12) {
             ArtworkView(url: store.displayArtworkURL, cornerRadius: 8, seed: store.track?.title)
                 .frame(width: 40, height: 40)
                 .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
@@ -162,6 +170,9 @@ struct MiniPlayer: View {
                         .lineLimit(1)
                 }
             }
+            }
+            .offset(x: dragOffset)
+            .opacity(1 - min(abs(dragOffset) / 160, 0.5))
             Spacer(minLength: 4)
             Button { store.togglePlayPause() } label: {
                 Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
@@ -186,6 +197,26 @@ struct MiniPlayer: View {
         .frame(height: 60)
         .contentShape(Capsule())
         .onTapGesture(perform: open)
+        // 左にスワイプで次の曲、右にスワイプで前の曲（Apple Music のミニプレーヤーと同じ）
+        .gesture(
+            DragGesture(minimumDistance: 15)
+                .onChanged { value in
+                    guard abs(value.translation.width) > abs(value.translation.height),
+                          store.track != nil else { return }
+                    // 指より少し遅れて動かし、引っぱっている感じを出す
+                    dragOffset = value.translation.width * 0.45
+                }
+                .onEnded { value in
+                    let width = value.translation.width
+                    if store.track != nil, abs(width) > abs(value.translation.height),
+                       abs(width) > skipThreshold || abs(value.predictedEndTranslation.width) > skipThreshold * 2 {
+                        if width < 0 { store.next() } else { store.previousTrack() }
+                        skipCount += 1
+                    }
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { dragOffset = 0 }
+                }
+        )
+        .sensoryFeedback(.impact(weight: .light), trigger: skipCount)
     }
 
     private var subtitle: String {

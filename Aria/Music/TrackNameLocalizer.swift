@@ -29,6 +29,20 @@ actor TrackNameLocalizer {
 
     /// 調べた結果（nil は「見つからなかった」）。回数制限や通信エラーで調べられなかった曲は入れない
     private var cache: [String: CatalogMatch?] = [:]
+
+    /// アルバムごとの曲目（米国のストアの表記と、端末の地域のストアの表記）。
+    /// 同じアルバムのほかの曲は、問い合わせずにここから引く（キューにアルバムが並ぶと、1 曲ずつ問い合わせて
+    /// iTunes Search API の回数制限〈1 分あたり約 20 回〉にすぐ達し、ローマ字のまま残ってしまうため）
+    private struct AlbumTracks {
+        var us: [Song]
+        var local: [Song]
+    }
+    private var albumCache: [String: AlbumTracks] = [:]
+
+    private static func albumKey(artist: String, album: String?) -> String? {
+        guard let album, !normalized(album).isEmpty else { return nil }
+        return normalized(primaryArtist(artist)) + "|" + normalized(album)
+    }
     private var inflight: [String: Task<Outcome, Never>] = [:]
 
     private enum Outcome {
@@ -65,11 +79,24 @@ actor TrackNameLocalizer {
         return TrackNames(title: match.title, artist: match.artist, album: match.album ?? album)
     }
 
+    private static func cacheKey(title: String, artist: String, album: String?, duration: Double,
+                                 catalogSongID: String?) -> String {
+        catalogSongID.map { "id:\($0)" } ?? "q:\(title)|\(artist)|\(album ?? "")|\(Int(duration))".lowercased()
+    }
+
+    /// まだ結果が出ていない（回数制限や通信エラーで調べられなかった）か。true なら、時間をおいてもう一度調べるとよい
+    func isPending(title: String, artist: String, album: String?, duration: Double, catalogSongID: String?) -> Bool {
+        guard !title.isEmpty else { return false }
+        return cache[Self.cacheKey(title: title, artist: artist, album: album, duration: duration,
+                                   catalogSongID: catalogSongID)] == nil
+    }
+
     /// カタログで曲を探す（結果は曲ごとに覚えておく）
     func match(title: String, artist: String, album: String?, duration: Double,
                catalogSongID: String?) async -> CatalogMatch? {
         guard !title.isEmpty else { return nil }
-        let key = catalogSongID.map { "id:\($0)" } ?? "q:\(title)|\(artist)|\(album ?? "")|\(Int(duration))".lowercased()
+        let key = Self.cacheKey(title: title, artist: artist, album: album, duration: duration,
+                                catalogSongID: catalogSongID)
         if let cached = cache[key] { return cached }
         if let running = inflight[key] {
             if case .found(let match) = await running.value { return match }
@@ -109,6 +136,11 @@ actor TrackNameLocalizer {
         var songID = catalogSongID
         /// 米国のストアで見つけた曲（端末の地域のストアにその ID がないときに使う）
         var usSong: Song?
+        // 同じアルバムの曲目をすでに取ってあれば、問い合わせずにそこから探す
+        if songID == nil, let key = Self.albumKey(artist: artist, album: album), let tracks = albumCache[key],
+           let song = Self.track(in: tracks, title: title, duration: duration) {
+            return Self.outcome(song)
+        }
         if songID == nil {
             guard takeRequestSlot() else { return .retryLater }
             let query = ["term": "\(title) \(Self.primaryArtist(artist))", "entity": "song", "limit": "15",
@@ -138,6 +170,16 @@ actor TrackNameLocalizer {
             songID = chosen.trackId.map(String.init)
             usSong = chosen
             guard songID != nil else { return .notFound }
+            // 曲 ID の代わりにアルバムの曲目をまとめて引く（問い合わせ 1 回で、同じアルバムのほかの曲の分もそろう）
+            if let collectionID = chosen.collectionId, Self.sameAlbum(chosen, album),
+               let key = Self.albumKey(artist: artist, album: album) {
+                guard takeRequestSlot() else { return .retryLater }
+                if let local = await localTracks(albumID: collectionID) {
+                    let us = results.filter { $0.collectionId == collectionID && $0.kind == "song" }
+                    albumCache[key] = AlbumTracks(us: us.isEmpty ? [chosen] : us, local: local)
+                    if let song = local.first(where: { $0.trackId == chosen.trackId }) { return Self.outcome(song) }
+                }
+            }
         }
         guard let songID, takeRequestSlot() else { return .retryLater }
         let query = ["id": songID, "country": Self.country, "lang": Self.prefersJapanese ? "ja_jp" : "en_us",
@@ -145,10 +187,41 @@ actor TrackNameLocalizer {
         guard let results = await request("lookup", query) else { return .retryLater }
         // 同じ曲でも、地域によってストアにない版がある（例：STAY のクリーン版は日本のストアにない）。
         // そのときは米国のストアで見つけた情報を使う（曲名は Sonos と同じ英語表記、アートワークは高画質）
-        guard let found = results.first(where: { $0.kind == "song" }) ?? usSong,
-              let newTitle = found.trackName, let newArtist = found.artistName else { return .notFound }
-        return .found(CatalogMatch(title: newTitle, artist: newArtist, album: found.collectionName,
-                                   artworkURL: Self.largeArtwork(found.artworkUrl100)))
+        guard let found = results.first(where: { $0.kind == "song" }) ?? usSong else { return .notFound }
+        return Self.outcome(found)
+    }
+
+    private static func outcome(_ song: Song) -> Outcome {
+        guard let title = song.trackName, let artist = song.artistName else { return .notFound }
+        return .found(CatalogMatch(title: title, artist: artist, album: song.collectionName,
+                                   artworkURL: largeArtwork(song.artworkUrl100)))
+    }
+
+    /// アルバムの曲目から、Sonos が示す曲を探す
+    /// 1. 米国のストアの表記（Sonos と同じローマ字）で曲名が一致する曲 → 同じ ID の地域の表記
+    /// 2. 地域の表記で曲名が一致する曲（「Ham」のように日本語表記も同じ曲）
+    /// 3. 長さが ±2 秒以内の曲がアルバム内にひとつだけなら、その曲
+    private static func track(in album: AlbumTracks, title: String, duration: Double) -> Song? {
+        let wanted = normalized(title)
+        if let us = album.us.first(where: { $0.trackName.map(normalized) == wanted }) {
+            return album.local.first { $0.trackId == us.trackId } ?? us
+        }
+        if let same = album.local.first(where: { $0.trackName.map(normalized) == wanted }) { return same }
+        guard duration > 0 else { return nil }
+        let close = album.local.filter { song in
+            guard let millis = song.trackTimeMillis else { return false }
+            return abs(Double(millis) / 1000 - duration) <= 2
+        }
+        return close.count == 1 ? close.first : nil
+    }
+
+    /// 端末の地域のストアでのアルバムの曲目
+    private func localTracks(albumID: Int) async -> [Song]? {
+        guard let tracks = await request("lookup", ["id": String(albumID), "entity": "song", "limit": "200",
+                                                    "country": Self.country,
+                                                    "lang": Self.prefersJapanese ? "ja_jp" : "en_us"])
+        else { return nil }
+        return tracks.filter { $0.kind == "song" && $0.trackId != nil }
     }
 
     /// 曲名が一致し、アーティストも合い、長さも ±3 秒以内の曲。`album` を渡すと、そのアルバムの版だけ
@@ -205,36 +278,21 @@ actor TrackNameLocalizer {
         guard let tracks = await request("lookup", ["id": albumIDs.prefix(30).map(String.init).joined(separator: ","),
                                                     "entity": "song", "limit": "200", "country": "us"])
         else { return .retryLater }
+        // アルバムが特定できたら、地域の表記の曲目も取ってまとめて覚える（同じアルバムのほかの曲は問い合わせ不要になる）。
+        // 米国のストアにはアルバムの情報だけあって、曲が配信されていないこともある
+        // （例：ずっと真夜中でいいのに。の「朗らかな皮膚とて不服」）。そのときも地域の曲目から曲名か長さで探せる
+        if let sameAlbumID, let key = Self.albumKey(artist: artist, album: album) {
+            guard takeRequestSlot() else { return .retryLater }
+            guard let local = await localTracks(albumID: sameAlbumID) else { return .retryLater }
+            let entry = AlbumTracks(us: tracks.filter { $0.kind == "song" && $0.trackId != nil }, local: local)
+            albumCache[key] = entry
+            guard let song = Self.track(in: entry, title: title, duration: duration) else { return .notFound }
+            return .found(song, sameAlbum: true)
+        }
         if let song = Self.bestMatch(in: tracks, title: title, artist: artist, duration: duration) {
             return .found(song, sameAlbum: Self.sameAlbum(song, album))
         }
-        // 米国のストアにはアルバムの情報だけあって、曲が配信されていないことがある
-        // （例：ずっと真夜中でいいのに。の「朗らかな皮膚とて不服」）。アルバムが特定できているときは、
-        // 端末の地域のストアでそのアルバムの曲目を引き、曲名か長さで同じ曲を探す
-        guard let sameAlbumID else { return .notFound }
-        return await localAlbumTrack(albumID: sameAlbumID, title: title, duration: duration)
-    }
-
-    /// 端末の地域のストアで、アルバムの曲目から同じ曲を探す。
-    /// 曲名は地域の表記（日本語）になっていることがあるので、曲名が一致しなければ長さで照合する。
-    /// 同じアルバムの中で長さが ±2 秒以内の曲がひとつだけのときに限る（取り違えを防ぐため）
-    private func localAlbumTrack(albumID: Int, title: String, duration: Double) async -> FallbackResult {
-        guard takeRequestSlot() else { return .retryLater }
-        guard let tracks = await request("lookup", ["id": String(albumID), "entity": "song", "limit": "200",
-                                                    "country": Self.country,
-                                                    "lang": Self.prefersJapanese ? "ja_jp" : "en_us"])
-        else { return .retryLater }
-        let songs = tracks.filter { $0.kind == "song" && $0.trackId != nil }
-        if let same = songs.first(where: { $0.trackName.map(Self.normalized) == Self.normalized(title) }) {
-            return .found(same, sameAlbum: true)
-        }
-        guard duration > 0 else { return .notFound }
-        let close = songs.filter { song in
-            guard let millis = song.trackTimeMillis else { return false }
-            return abs(Double(millis) / 1000 - duration) <= 2
-        }
-        guard close.count == 1, let song = close.first else { return .notFound }
-        return .found(song, sameAlbum: true)
+        return .notFound
     }
 
     /// 曲が、Sonos が示すアルバムの版か（アルバム名が分からないときは問わない）
@@ -275,6 +333,7 @@ actor TrackNameLocalizer {
 
     func removeAll() {
         cache.removeAll()
+        albumCache.removeAll()
     }
 
     private func takeRequestSlot() -> Bool {
